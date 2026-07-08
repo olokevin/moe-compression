@@ -1,0 +1,39 @@
+[project]
+name = "moe-slimming"
+version = "0.1.0"
+description = "Attribution-Guided and Coverage-Maximized Pruning for Structural MoE Compression"
+readme = "README.md"
+requires-python = "==3.12.*"
+
+# Direct dependencies, pinned to the versions currently in .venv so that
+# `uv sync` reproduces the working environment. Transitive deps are locked
+# in uv.lock. Regenerate with `uv lock` after bumping any pin here.
+dependencies = [
+    "torch==2.13.0",
+    "transformers==4.57.6",
+    "peft==0.19.1",
+    "datasets==3.6.0",
+    "accelerate==1.14.0",
+    "safetensors==0.8.0",
+    "bitsandbytes==0.49.2",
+    "wandb==0.28.0",
+    "tqdm==4.68.4",
+    "pyyaml==6.0.3",
+    "numpy==2.5.1",
+    "scipy==1.18.0",
+    "pandas==3.0.3",
+    "scikit-learn==1.9.0",
+    "sentencepiece==0.2.1",
+    "protobuf==7.35.1",
+    "einops==0.8.2",
+    "evaluate==0.4.0",
+    "lm-eval==0.4.9.1",
+]
+
+[tool.uv]
+# This repo runs via PYTHONPATH (imported as `src.*` / `eval`), not as an
+# installed package, so uv only manages the environment — it does not build
+# the root. The `src/compress` git submodule and the `alignment` package are
+# not on PyPI; install those separately (submodule via
+# `git submodule update --init --recursive`).
+package = false
