@@ -1,0 +1,3 @@
+[submodule "src/compress"]
+	path = src/compress
+	url = git@github.com:olokevin/compress.git
