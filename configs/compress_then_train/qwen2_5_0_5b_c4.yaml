@@ -1,0 +1,47 @@
+# Compress-then-train recipe for Qwen/Qwen2.5-0.5B.
+#
+# Pipeline: C4-calibrated SVD compression  ->  continue training on C4 (CE)
+#           ->  benchmark C4 PPL + hellaswag + MMLU (before vs. after).
+#
+# All fields map to KDScriptArguments / KDDecompositionConfig / KDTrainingConfig
+# in src/compress_then_train.py. CLI flags (--key value) override these values.
+
+# ── Model / optimization (KDScriptArguments) ────────────────────────────────
+model_name_or_path: Qwen/Qwen2.5-0.5B
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 4
+gradient_accumulation_steps: 8
+num_epochs: 1
+seed: 42
+no_wandb: true
+
+# ── Compression (KDDecompositionConfig) ──────────────────────────────────────
+train_mode: svd_llm_v2          # C4-calibrated SVD (forward covariances)
+compression_ratio: 0.8          # retain 80% of params (=> ~20% compression)
+calib_source: c4
+calib_num_seqs: 128
+calib_max_length: 2048
+calib_seed: 3
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+# ── Continue-training (KDTrainingConfig) ─────────────────────────────────────
+kd_loss_type: ce                # teacher-free next-token CE on C4
+ce_data_source: c4
+ce_seq_len: 1024
+ce_steps: 200
+save_steps: none
+base_dir: outputs/compress_then_train
+
+# ── Benchmarking ─────────────────────────────────────────────────────────────
+run_lm_eval: true
+eval_before_compression: true
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: 200              # per-task sample cap for a fast pass; -1 = full task
+lm_eval_batch_size: 4
+lm_eval_max_seqlen: 2048

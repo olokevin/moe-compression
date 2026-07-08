@@ -56,18 +56,15 @@ except ImportError:
     save_safetensors_file = None  # type: ignore[assignment]
 
 # Make repo packages importable.
-# run_kd.py lives in src/, so repo_root = src/../ = project root.
-# Adding src/ and src/open_r1/ lets us import `compress` and `open_r1_trl`.
+# compress_then_train.py lives in src/, so repo_root = src/../ = project root.
+# Adding src/ lets us import the `compress` submodule; adding the repo root lets
+# us import the top-level `eval` package (lm-eval-harness adaptor).
 _src_dir = pathlib.Path(__file__).resolve().parent          # src/
-_open_r1_dir = _src_dir / "open_r1"                         # src/open_r1/
-for _p in (str(_src_dir), str(_open_r1_dir)):
+_repo_root = _src_dir.parent                                # project root
+for _p in (str(_src_dir), str(_repo_root)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# Import TrlParser directly from its sub-module to avoid triggering the
-# open_r1_trl __init__.py, which has heavy trainer imports that require
-# the `compress` package to already be on the path with GPU deps.
-from open_r1_trl.trl.scripts.utils import TrlParser  # noqa: E402
 from compress.ppl_eval import evaluate_model_ppl  # noqa: E402
 
 _VALID_TRAIN_MODES = {
@@ -337,6 +334,30 @@ class KDTrainingConfig:
         metadata={"help": "Comma-separated optimizer steps to save checkpoints (e.g. '10,30,final') or 'none'."},
     )
     base_dir: str = field(default="outputs/kd_runs", metadata={"help": "Base directory for run outputs."})
+    run_lm_eval: bool = field(
+        default=True,
+        metadata={"help": "Run lm-eval-harness benchmarks (before compression and after training)."},
+    )
+    lm_eval_tasks: str = field(
+        default="hellaswag,mmlu",
+        metadata={"help": "Comma-separated lm-eval-harness task names to benchmark."},
+    )
+    lm_eval_limit: int = field(
+        default=-1,
+        metadata={"help": "Per-task sample cap for lm-eval (<=0 means the full task)."},
+    )
+    lm_eval_batch_size: int = field(
+        default=4,
+        metadata={"help": "Batch size for lm-eval-harness evaluation."},
+    )
+    lm_eval_max_seqlen: int = field(
+        default=2048,
+        metadata={"help": "Max sequence length for lm-eval-harness evaluation."},
+    )
+    eval_before_compression: bool = field(
+        default=True,
+        metadata={"help": "Also benchmark the uncompressed base model for a before/after comparison."},
+    )
 
     def __post_init__(self):
         if self.kd_loss_type not in _VALID_KD_LOSS_TYPES:
@@ -588,50 +609,46 @@ def _build_calib_loader(tokenizer, decomp_args: KDDecompositionConfig, train_com
       c4            — stream from HuggingFace C4
       traces        — local JSONL at calib_traces_path (prompt+completion text)
       training_data — use train_completions passed in from the KD training set
-    """
-    from datasets import load_dataset as hf_load_dataset, Dataset as HFDataset
-    _trl_dir = str(_src_dir / "open_r1" / "open_r1_trl")
-    if _trl_dir not in sys.path:
-        sys.path.insert(0, _trl_dir)
-    from trl.pruner.pruning import make_calib_loader
 
-    total_tokens = decomp_args.calib_num_seqs * decomp_args.calib_max_length
-    svdllm_compat = decomp_args.train_mode in {
-        "svd_llm",
-        "svd_llm_v2",
-        "svd_llm_v2_bp",
-        "svd_llm_v2_combined",
-        "svd_als",
-        "svd_twosteps",
-        "btt_llm_v2",
-        "btt_llm_v2_bp",
-        "btt_llm_v2_combined",
-        "btt_twosteps",
-    }
+    Backed by the self-contained loaders in the `compress` package, which pack
+    calibration text into fixed-length token windows (matching the covariance
+    calibration used by the SVD/BTT decomposition methods).
+    """
+    from compress.loaders import (
+        build_c4_calib_loader,
+        build_text_calib_loader,
+        build_traces_jsonl_calib_loader,
+    )
 
     if decomp_args.calib_source == "c4":
-        dataset = hf_load_dataset("allenai/c4", "en", split="train", streaming=True)
-    elif decomp_args.calib_source == "traces":
-        dataset = hf_load_dataset("json", data_files=decomp_args.calib_traces_path, split="train")
-        dataset = dataset.map(lambda r: {"text": r["prompt"] + r["completion"]})
-    else:  # training_data
-        if not train_completions:
-            raise ValueError(
-                "calib_source='training_data' requires train_completions; "
-                "ensure kd_loss_type is not 'ce' so training data is loaded."
-            )
-        texts = [c["prompt"] + c["completion"] for c in train_completions]
-        dataset = HFDataset.from_dict({"text": texts})
-
-    return make_calib_loader(
-        dataset, tokenizer,
-        tokens=total_tokens,
-        batch_size=8,
-        max_samples=decomp_args.calib_num_seqs,
+        return build_c4_calib_loader(
+            tokenizer,
+            num_seqs=decomp_args.calib_num_seqs,
+            max_length=decomp_args.calib_max_length,
+            batch_size=8,
+            seed=decomp_args.calib_seed,
+        )
+    if decomp_args.calib_source == "traces":
+        return build_traces_jsonl_calib_loader(
+            tokenizer,
+            decomp_args.calib_traces_path,
+            num_seqs=decomp_args.calib_num_seqs,
+            max_length=decomp_args.calib_max_length,
+            batch_size=8,
+        )
+    # training_data
+    if not train_completions:
+        raise ValueError(
+            "calib_source='training_data' requires train_completions; "
+            "ensure kd_loss_type is not 'ce' so training data is loaded."
+        )
+    texts = [c["prompt"] + c["completion"] for c in train_completions]
+    return build_text_calib_loader(
+        tokenizer,
+        texts,
+        num_seqs=decomp_args.calib_num_seqs,
         max_length=decomp_args.calib_max_length,
-        prompt_column="text",
-        svdllm_compat=svdllm_compat,
-        calib_seed=decomp_args.calib_seed,
+        batch_size=8,
     )
 
 
@@ -1109,6 +1126,114 @@ def load_teacher_model(teacher_model_id, device):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Benchmarking (lm-eval-harness + C4/WikiText PPL)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _flatten_lm_eval_metrics(raw_results: dict) -> dict:
+    """Reduce lm-eval-harness's per-task result dict to {task: primary_acc}.
+
+    lm-eval returns a nested {task_name: {metric,stderr,...}} structure. We keep
+    the main accuracy-style metric per task (acc_norm preferred, then acc), so
+    the before/after comparison is a flat, readable mapping.
+    """
+    flat = {}
+    for task, metrics in raw_results.items():
+        if not isinstance(metrics, dict):
+            continue
+        value = None
+        for key in ("acc_norm,none", "acc,none", "acc_norm", "acc", "exact_match,none", "exact_match"):
+            if key in metrics and isinstance(metrics[key], (int, float)):
+                value = float(metrics[key])
+                break
+        if value is None:
+            # Fall back to the first numeric, non-stderr metric.
+            for key, val in metrics.items():
+                if "stderr" in key or not isinstance(val, (int, float)):
+                    continue
+                value = float(val)
+                break
+        if value is not None:
+            flat[task] = value
+    return flat
+
+
+def run_benchmark(model, tokenizer, model_name, kd_args: "KDTrainingConfig", device):
+    """Run C4/WikiText PPL + lm-eval-harness tasks; return a flat metrics dict.
+
+    Keys are prefixed: ``ppl/<dataset>`` and ``lm_eval/<task>``.
+    """
+    metrics = {}
+
+    # ── Perplexity (always includes C4) ──────────────────────────────────────
+    ppl = evaluate_model_ppl(
+        model,
+        tokenizer,
+        seqlen=kd_args.lm_eval_max_seqlen,
+        seed=0,
+        datasets=("wikitext2", "c4"),
+        device=device,
+    )
+    for name, value in ppl.items():
+        metrics[f"ppl/{name}"] = value
+    print("[bench] PPL: " + ", ".join(f"{k}={v:.4f}" for k, v in ppl.items()))
+
+    # ── lm-eval-harness tasks (hellaswag, mmlu, ...) ─────────────────────────
+    tasks = [t.strip() for t in kd_args.lm_eval_tasks.split(",") if t.strip()]
+    if tasks:
+        from eval.lm_harness.eval import eval_tasks
+
+        num_fewshot = 5 if any(t == "mmlu" for t in tasks) else 0
+        was_training = model.training
+        model.eval()
+        try:
+            raw = eval_tasks(
+                model,
+                model_name,
+                tokenizer,
+                tasks,
+                limit=kd_args.lm_eval_limit,
+                max_seqlen=kd_args.lm_eval_max_seqlen,
+                batch_size=kd_args.lm_eval_batch_size,
+                num_fewshot=num_fewshot,
+            )
+        finally:
+            if was_training:
+                model.train()
+        for task, value in _flatten_lm_eval_metrics(raw).items():
+            metrics[f"lm_eval/{task}"] = value
+        print(
+            "[bench] lm-eval: "
+            + ", ".join(f"{k}={v:.4f}" for k, v in metrics.items() if k.startswith("lm_eval/"))
+        )
+
+    return metrics
+
+
+def _print_benchmark_comparison(before: Optional[dict], after: dict):
+    """Pretty-print a before/after benchmark comparison table."""
+    keys = sorted(set((before or {}).keys()) | set(after.keys()))
+    if not keys:
+        return
+    print("\n" + "=" * 72)
+    print("  BENCHMARK COMPARISON (before compression  ->  after compress+train)")
+    print("=" * 72)
+    header = f"  {'metric':<24}{'before':>14}{'after':>14}{'delta':>14}"
+    print(header)
+    print("  " + "-" * 66)
+    for key in keys:
+        b = (before or {}).get(key)
+        a = after.get(key)
+        b_str = f"{b:.4f}" if isinstance(b, (int, float)) else "-"
+        a_str = f"{a:.4f}" if isinstance(a, (int, float)) else "-"
+        if isinstance(b, (int, float)) and isinstance(a, (int, float)):
+            d_str = f"{a - b:+.4f}"
+        else:
+            d_str = "-"
+        print(f"  {key:<24}{b_str:>14}{a_str:>14}{d_str:>14}")
+    print("=" * 72 + "\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Main
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1189,6 +1314,16 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # ── Baseline benchmark (uncompressed model) ───────────────────────────────
+    baseline_metrics = None
+    if kd_args.run_lm_eval and kd_args.eval_before_compression:
+        print("[bench] Benchmarking base (uncompressed) model ...")
+        baseline_metrics = run_benchmark(
+            model, tokenizer, script_args.model_name_or_path, kd_args, device
+        )
+        if use_wandb:
+            wandb.log({f"baseline/{k}": v for k, v in baseline_metrics.items()})
 
     # ── Decompose ─────────────────────────────────────────────────────────────
     model = decompose_model(model, tokenizer, decomp_args, train_completions=train_completions)
@@ -1437,6 +1572,35 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     #             math_payload["val/math_accuracy"] = math_metrics["accuracy"]
     #         wandb.log(math_payload)
 
+    # ── Final benchmark (after compress + train) + comparison ─────────────────
+    if kd_args.run_lm_eval:
+        print("[bench] Benchmarking compressed + fine-tuned model ...")
+        final_metrics = run_benchmark(
+            model, tokenizer, script_args.model_name_or_path, kd_args, device
+        )
+        if use_wandb:
+            wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
+
+        _print_benchmark_comparison(baseline_metrics, final_metrics)
+
+        os.makedirs(run_dir, exist_ok=True)
+        bench_path = os.path.join(run_dir, "benchmark_comparison.json")
+        with open(bench_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "model": script_args.model_name_or_path,
+                    "train_mode": decomp_args.train_mode,
+                    "compression_ratio": decomp_args.compression_ratio,
+                    "kd_loss_type": kd_args.kd_loss_type,
+                    "tasks": kd_args.lm_eval_tasks,
+                    "before_compression": baseline_metrics,
+                    "after_compress_train": final_metrics,
+                },
+                f,
+                indent=2,
+            )
+        print(f"[bench] Saved benchmark comparison to {bench_path}")
+
     if use_wandb:
         wandb.finish()
 
@@ -1446,7 +1610,43 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
         print("Training complete. No output directory was created.")
 
 
+def parse_args_and_config(dataclass_types):
+    """Parse a YAML ``--config`` file with CLI overrides into dataclasses.
+
+    Drop-in replacement for trl's ``TrlParser.parse_args_and_config`` built on
+    ``transformers.HfArgumentParser`` (an ``argparse.ArgumentParser`` subclass):
+    values from the YAML file become argparse defaults, and any explicit CLI
+    flag (``--key value``) overrides its YAML counterpart.
+    """
+    import argparse
+
+    from transformers import HfArgumentParser
+
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=str, default=None)
+    known, remaining = pre.parse_known_args()
+
+    parser = HfArgumentParser(dataclass_types)
+
+    if known.config:
+        import yaml
+
+        with open(known.config, "r", encoding="utf-8") as f:
+            yaml_defaults = yaml.safe_load(f) or {}
+        if not isinstance(yaml_defaults, dict):
+            raise ValueError(f"Config {known.config!r} must contain a top-level mapping.")
+        # YAML values become argparse defaults; CLI flags below override them.
+        parser.set_defaults(**yaml_defaults)
+        # Fields supplied by the YAML are no longer required on the CLI.
+        for action in parser._actions:
+            if action.dest in yaml_defaults:
+                action.required = False
+
+    return parser.parse_args_into_dataclasses(args=remaining)
+
+
 if __name__ == "__main__":
-    parser = TrlParser((KDScriptArguments, KDDecompositionConfig, KDTrainingConfig))
-    script_args, decomp_args, kd_args = parser.parse_args_and_config()
+    script_args, decomp_args, kd_args = parse_args_and_config(
+        (KDScriptArguments, KDDecompositionConfig, KDTrainingConfig)
+    )
     main(script_args, decomp_args, kd_args)
