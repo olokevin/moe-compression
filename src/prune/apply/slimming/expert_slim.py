@@ -37,6 +37,63 @@ except Exception:
     _HAS_BNB = False
 
 
+def _nystrom_reconstruct_down_proj(
+    W_down: torch.Tensor,
+    C_sigma: torch.Tensor,
+    keep_mask: torch.Tensor,
+    lambda_ridge: float = 1.0,
+    device: str = "cuda",
+) -> torch.Tensor:
+    """Nyström closed-form reconstruction for down_proj on the kept channel subset.
+
+    Instead of plain column slicing W_down[:, kept], this solves:
+        W_down_new^T = (S^T C S)^{-1} (S^T C) W_down^T
+
+    where S is the column-selection matrix for kept channels. This minimizes
+    the activation-weighted reconstruction error of the MLP output.
+
+    Args:
+        W_down: (H, I) original down_proj weight.
+        C_sigma: (I, I) per-expert hidden activation covariance.
+        keep_mask: (I,) boolean mask of kept channels.
+        lambda_ridge: Ridge regularization for the sub-kernel solve.
+        device: compute device.
+
+    Returns:
+        W_down_new: (H, k) reconstructed down_proj weight.
+    """
+    idx = torch.where(keep_mask)[0].to(device)
+
+    C = C_sigma.to(device=device, dtype=torch.float32)
+    C = 0.5 * (C + C.T)
+
+    # C_sub = S^T C S  (k x k submatrix)
+    C_sub = C.index_select(0, idx).index_select(1, idx)
+    # rhs = S^T C W_down^T  (k x H)
+    rhs = C.index_select(0, idx) @ W_down.to(device=device, dtype=torch.float32).T
+
+    # Solve C_sub @ X = rhs with Cholesky (escalating ridge for numerical stability)
+    sub_scale = C_sub.diagonal().abs().mean().clamp_min(1.0)
+    sub_ridge = max(lambda_ridge, 1.0) * torch.finfo(C_sub.dtype).eps * sub_scale
+
+    W_down_new = None
+    for _ in range(6):
+        C_sub_reg = C_sub.clone()
+        C_sub_reg.diagonal().add_(sub_ridge)
+        chol, info = torch.linalg.cholesky_ex(C_sub_reg)
+        if int(info.item()) == 0:
+            W_down_new = torch.cholesky_solve(rhs, chol).T  # (H, k)
+            break
+        sub_ridge *= 10.0
+
+    if W_down_new is None:
+        C_sub_reg = C_sub.clone()
+        C_sub_reg.diagonal().add_(sub_ridge)
+        W_down_new = torch.linalg.solve(C_sub_reg, rhs).T  # (H, k)
+
+    return W_down_new.to(device=W_down.device, dtype=W_down.dtype)
+
+
 @torch.no_grad()
 def slim_moe_inter(
     model: nn.Module,
@@ -45,6 +102,9 @@ def slim_moe_inter(
     shrink_gate: bool = False,
     add_hooks: bool = True,
     verbose: bool = True,
+    nystrom_reconstruct: bool = False,
+    expert_covariances: Optional[Dict] = None,
+    lambda_ridge: float = 1.0,
 ) -> Dict[str, int]:
     """
     Prune MoE intermediate dims (inter) and optionally prune hidden input dims for gate_proj/up_proj.
@@ -136,7 +196,19 @@ def slim_moe_inter(
             b_gate_new = None if b_gate is None else b_gate[m_inter]
             W_up_new = W_up[m_inter, :]
             b_up_new = None if b_up is None else b_up[m_inter]
-            W_down_new = W_down[:, m_inter]
+
+            if nystrom_reconstruct and expert_covariances is not None:
+                # Nyström closed-form reconstruction for down_proj
+                layer_covs = expert_covariances.get(lid, {})
+                cov = layer_covs.get(eid, None)
+                if cov is not None:
+                    W_down_new = _nystrom_reconstruct_down_proj(
+                        W_down, cov, m_inter, lambda_ridge=lambda_ridge, device=device
+                    )
+                else:
+                    W_down_new = W_down[:, m_inter]
+            else:
+                W_down_new = W_down[:, m_inter]
             b_down_new = b_down
 
             small_gate = _build_slim_linear_16bit(W_gate_new, b_gate_new, device=device, dtype=torch.float16)

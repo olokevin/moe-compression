@@ -1,0 +1,41 @@
+# One-shot Qwen3-30B-A3B with Nystrom leverage + reconstruction — HellaSwag eval
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: true
+shrink_gate: true
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.25
+  nystrom_reconstruct: true
+  lambda_ridge: 1.0
+  mask_method_kwargs:
+    intra_layer_method: "attr_coverage"
+    intra_expert_metric: "leverage"
+    inter_layer_method: "loss_coverage"
+  adjust_masks_kwargs:
+    align_inter: 0
+    min_per_expert: 16
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_nystrom_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

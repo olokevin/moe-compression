@@ -43,19 +43,20 @@ def clear_hooks(block: nn.Module):
     mlp.saved_output = None
 
     
-def block_forward(model: nn.Module, 
-                  cnt_block: nn.Module, 
-                  layer_idx: int, 
-                  dataset: list, 
-                  tokenizer, 
+def block_forward(model: nn.Module,
+                  cnt_block: nn.Module,
+                  layer_idx: int,
+                  dataset: list,
+                  tokenizer,
                   max_seq_length: int,
                   saliency_ema: float,
-                  batch_size: int = 128, 
+                  batch_size: int = 128,
                   calib_batches: int = 10,
                   loss_fn: str = "rel_l2",
-                  device: str = "cuda", 
+                  device: str = "cuda",
                   dtype=torch.float32,
-                  verbose: bool = False):
+                  verbose: bool = False,
+                  collect_covariance: bool = False):
 
     model.eval().to(device)
     hooks = add_hooks(model, cnt_block, layer_idx)
@@ -153,9 +154,10 @@ def block_forward(model: nn.Module,
         loss_sum.backward()
         total_loss += loss_sum.detach().float().item()
 
-        collect_scores_attn_mlp(cnt_block, 
-                                ema=saliency_ema, 
-                                attn_mask=attn_mask)
+        collect_scores_attn_mlp(cnt_block,
+                                ema=saliency_ema,
+                                attn_mask=attn_mask,
+                                collect_covariance=collect_covariance)
         collect_gate_scores(cnt_block.mlp, ema=saliency_ema)
         
     clear_hooks(cnt_block)

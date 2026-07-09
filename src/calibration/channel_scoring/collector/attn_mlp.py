@@ -1,9 +1,11 @@
 import torch
 from .utils import *
-        
-def collect_scores_attn_mlp(cnt_block, 
-                            ema: float = 0.9, 
-                            attn_mask: torch.Tensor = None) -> None:
+
+
+def collect_scores_attn_mlp(cnt_block,
+                            ema: float = 0.9,
+                            attn_mask: torch.Tensor = None,
+                            collect_covariance: bool = False) -> None:
 
     for expert in cnt_block.mlp.experts:
         down_input    = expert.down_proj.saved_input
@@ -61,3 +63,17 @@ def collect_scores_attn_mlp(cnt_block,
                 expert_out_token_contrib = token_contrib(down_out_grad, down_output).sum() * usage
                 safe_add_with_ema(expert, ema, expert_out_token_contrib, "expert_out_token_contrib")
                 safe_add_with_ema(expert, ema, usage, "usage")
+
+                # Accumulate per-expert down_proj input covariance for ridge leverage
+                if collect_covariance:
+                    z = down_input.detach().float()  # (n_tokens, I)
+                    if z.ndim == 3:
+                        z = z.reshape(-1, z.shape[-1])
+                    cov_batch = (z.t() @ z) / max(z.shape[0], 1)  # (I, I)
+                    old_cov = getattr(expert, "_cov_accumulator", None)
+                    old_count = getattr(expert, "_cov_count", 0)
+                    if old_cov is None:
+                        expert._cov_accumulator = cov_batch.cpu()
+                    else:
+                        expert._cov_accumulator = old_cov + cov_batch.cpu()
+                    expert._cov_count = old_count + 1
