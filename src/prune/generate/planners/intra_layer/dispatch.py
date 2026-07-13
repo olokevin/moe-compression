@@ -11,7 +11,7 @@ __all__ = [
 ]
 
 supported_intra_layer_methods = ['uniform', 'channel_ranking', 'loss', 'global', 'usage', 'router', 'attr_coverage', "loss_coverage", "usage_coverage", "router_coverage"]
-supported_intra_expert_metrics = ["activation", "wa", "grad"]
+supported_intra_expert_metrics = ["activation", "wa", "grad", "leverage"]
 
 def build_masks(scores, expertwise_scores=None, keep_ratio=None, top_k=None, method='uniform', L=None, E=None, I=None, verbose=False, **kwargs):
     if method == 'uniform':

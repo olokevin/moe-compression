@@ -82,14 +82,32 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 3] Skip mask generation (prune_ratio=0)")
     
     if prune_ratio > 0:
+        # Check if Nyström reconstruction is enabled
+        nystrom_reconstruct = args.prune_kwargs.get("nystrom_reconstruct", False)
+        expert_covariances = None
+        lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
+
+        if nystrom_reconstruct:
+            import os as _os
+            cov_path = _os.path.join(args.scores_dir, "expert_covariances.pth")
+            if _os.path.exists(cov_path):
+                _print(f"[Step 3.5] Loading expert covariances from {cov_path}")
+                expert_covariances = torch.load(cov_path, map_location="cpu")
+            else:
+                _print(f"[Warning] nystrom_reconstruct=True but {cov_path} not found, falling back to plain slicing")
+                nystrom_reconstruct = False
+
         model = build_real_slim_model(
             model,
             mask=mask_result,                 # [L, E, I] bool
             shrink_gate=args.shrink_gate,
             add_hooks=False,
-            verbose=True
+            verbose=True,
+            nystrom_reconstruct=nystrom_reconstruct,
+            expert_covariances=expert_covariances,
+            lambda_ridge=lambda_ridge,
         )
-        _print(f"[Step 4] ✅ Real slim model built")
+        _print(f"[Step 4] ✅ Real slim model built" + (" (Nyström reconstruct)" if nystrom_reconstruct else ""))
         
     total_params_after_slim = count_params(model)
     _print("\n" + "=" * 80)

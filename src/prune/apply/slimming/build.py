@@ -6,7 +6,7 @@ It orchestrates the pruning process across different components of the model.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -25,15 +25,18 @@ def build_real_slim_model(
     shrink_gate: bool = False,
     add_hooks: bool = True,
     verbose: bool = False,
+    nystrom_reconstruct: bool = False,
+    expert_covariances: Optional[Dict] = None,
+    lambda_ridge: float = 1.0,
 ) -> nn.Module:
- 
+
     qcfg = getattr(getattr(model, "config", None), "quantization_config", None)
 
     if isinstance(mask, dict):
         inter_masks = mask["intermediate_masks"]
     else:
         inter_masks = mask
-        
+
     slim_moe_inter(
         model=model,
         inter_masks=inter_masks,
@@ -41,5 +44,8 @@ def build_real_slim_model(
         shrink_gate=shrink_gate,
         add_hooks=add_hooks,
         verbose=verbose,
+        nystrom_reconstruct=nystrom_reconstruct,
+        expert_covariances=expert_covariances,
+        lambda_ridge=lambda_ridge,
     )
     return model

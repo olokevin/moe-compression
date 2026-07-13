@@ -16,6 +16,7 @@ from src.base.shared_utils.safe_isinstance import (
 
 from src.prune.apply.masking.expert.forward_utils import _patch_block_alpha_if_needed
 from src.calibration.channel_scoring.forward import block_forward
+from src.calibration.channel_scoring.leverage import compute_ridge_leverage_scores
 
 def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
     
@@ -31,7 +32,8 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
     calib_dataset = load_datasets(calib_dataset, tokenizer, max_samples=args.calib_batches * args.batch_size)
 
     gate_scores = {"saliency": {}, "out": {}, "grad": {}, "usage": {}}
-    expert_scores = {"activation": {}, "saliency": {}, "wa": {}, "grad": {}, "token_contrib": {}, "expert_out_token_contrib": {}, "wg": {}, "weight": {}}
+    expert_scores = {"activation": {}, "saliency": {}, "wa": {}, "grad": {}, "token_contrib": {}, "expert_out_token_contrib": {}, "wg": {}, "weight": {}, "leverage": {}}
+    expert_covariances = {}  # {layer_idx: {eid: (I,I) covariance tensor}}
 
     layerwise_loss = []
     
@@ -65,7 +67,8 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
                       calib_batches=args.calib_batches,
                       device=args.device,
                       dtype=args.dtype,
-                      verbose=verbose)
+                      verbose=verbose,
+                      collect_covariance=True)
         
         layerwise_loss.append(total_loss)
         gate_saliency = getattr(copied_mlp.gate, 'saliency', None)
@@ -137,8 +140,28 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
         expert_scores["token_contrib"][layer_idx] = _layer_norm(expert_scores["token_contrib"][layer_idx])
         expert_scores["expert_out_token_contrib"][layer_idx] = expert_scores["expert_out_token_contrib"][layer_idx]
 
+        # Compute ridge leverage scores from accumulated covariances
+        expert_scores["leverage"][layer_idx] = torch.zeros((E, I), dtype=torch.float32, device=args.device)
+        layer_covs = {}
+        for eid in range(E):
+            expert = copied_mlp.experts[eid]
+            cov = getattr(expert, "_cov_accumulator", None)
+            count = getattr(expert, "_cov_count", 0)
+            if cov is not None and count > 0:
+                cov = cov / count  # average covariance
+                layer_covs[eid] = cov
+                leverage = compute_ridge_leverage_scores(cov.to(args.device), lambda_ridge=1.0)
+                expert_scores["leverage"][layer_idx][eid] = leverage
+            # Clean up to free memory
+            expert._cov_accumulator = None
+            expert._cov_count = 0
+        expert_covariances[layer_idx] = layer_covs
+        expert_scores["leverage"][layer_idx] = _layer_norm(expert_scores["leverage"][layer_idx])
+
     torch.save(gate_scores, os.path.join(output_dir, "gate_scores.pth"))
     torch.save(expert_scores, os.path.join(output_dir, "expert_scores.pth"))
+    # Save per-expert covariances for downstream Nyström reconstruction
+    torch.save(expert_covariances, os.path.join(output_dir, "expert_covariances.pth"))
     layerwise_loss = torch.tensor(layerwise_loss, dtype=torch.float32, device=args.device)
     torch.save(layerwise_loss, os.path.join(output_dir, "layerwise_loss.pth"))
     

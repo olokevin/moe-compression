@@ -55,7 +55,8 @@ def block_forward(model: nn.Module,
                   loss_fn: str = "rel_l2",
                   device: str = "cuda",
                   dtype=torch.float32,
-                  verbose: bool = False):
+                  verbose: bool = False,
+                  collect_covariance: bool = False):
 
     # A model sharded via accelerate (device_map='auto') must not be .to()'d — it raises.
     # Detect dispatch and only move when the model lives on a single device.
@@ -159,7 +160,8 @@ def block_forward(model: nn.Module,
 
         collect_scores_attn_mlp(cnt_block,
                                 ema=saliency_ema,
-                                attn_mask=attn_mask)
+                                attn_mask=attn_mask,
+                                collect_covariance=collect_covariance)
         collect_gate_scores(cnt_block.mlp, ema=saliency_ema)
         
     clear_hooks(cnt_block)
