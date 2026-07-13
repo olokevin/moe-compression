@@ -1,0 +1,48 @@
+# One-shot pruned Qwen3-30B-A3B (25% channel prune, no fine-tuning) — c4 ppl + hellaswag.
+# resume_path empty => no LoRA; real_slim physically removes pruned channels.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: true
+shrink_gate: true
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+max_steps: null
+log_every_n_steps: 5
+eval_every_n_steps: 20
+save_every_n_steps: 20
+
+eval_sample_limit: 50
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.5
+  mask_method_kwargs:
+    intra_layer_method: "attr_coverage"
+    intra_expert_metric: "activation"
+    inter_layer_method: "loss_coverage"
+  adjust_masks_kwargs:
+    align_inter: 0
+    min_per_expert: 16
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_finetuned50_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"
+
+resume_path: "/home/ubuntu/yequan/moe-compression/outputs/qwen3_30b_a3b_50p_4bit_20260710_014410/checkpoint-75"
+mask_dir: "/home/ubuntu/yequan/moe-compression/outputs/qwen3_30b_a3b_50p_4bit_20260710_014410/checkpoint-75/masks.pth"

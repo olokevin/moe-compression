@@ -1,0 +1,51 @@
+# Fast smoke test — exercises the full nystrom compress-then-train pipeline
+# end-to-end (compress -> continue-train -> eval -> write results) in minutes.
+# Same nystrom MLP compression as 05B_mlp_nystrom.yaml, but tiny eval/train.
+
+model_name_or_path: Qwen/Qwen2.5-0.5B
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 4
+gradient_accumulation_steps: 8
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── Mixed per-module compression: MLP=nystrom(0.8), attention dense ───────────
+compression_rules:
+  - pattern: 'model\.layers\.\d+\.mlp'
+    method: nystrom
+    compression_ratio: 0.8
+  - pattern: 'model\.layers\.\d+\.self_attn\.[qkvo]_proj'
+    method: none
+    compression_ratio: 1.0
+
+calib_source: c4
+calib_num_seqs: 32
+calib_max_length: 1024
+calib_seed: 3
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 1024
+skip_layers: lm_head
+
+# ── Continue-training (short) ─────────────────────────────────────────────────
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 1024
+ce_steps: 20
+save_steps: none
+base_dir: outputs/compress_then_train
+
+# ── Benchmarking (hellaswag only, tiny subset; no periodic eval) ──────────────
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: true
+eval_every_steps: 0
+lm_eval_tasks: hellaswag
+lm_eval_limit: 20
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 1024

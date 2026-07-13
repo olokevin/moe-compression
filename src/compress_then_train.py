@@ -164,6 +164,22 @@ class KDDecompositionConfig:
         default=0.7,
         metadata={"help": "Fraction of params to retain (e.g. 0.7 = 70%). Ignored when train_mode=full."},
     )
+    # NOTE: declared as Optional[str] so HfArgumentParser can build a CLI action
+    # for it, but it is never parsed from the CLI — parse_args_and_config() pops
+    # it from the YAML (a list of dicts) and injects it after parsing.
+    compression_rules: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Mixed per-module compression strategy (YAML only). A list of rule "
+                "dicts, ordered general -> specific (last matching rule wins). Each "
+                "rule has: 'pattern' (regex matched against the module's dotted name "
+                "via re.search), 'method' (svd/svd_llm_v2/btt_llm_v2/nystrom/... or "
+                "'none'/'full' to skip), and 'compression_ratio'. When set, this "
+                "overrides the single-method train_mode/compression_ratio path."
+            )
+        },
+    )
     calib_source: str = field(
         default="c4",
         metadata={
@@ -182,6 +198,13 @@ class KDDecompositionConfig:
     )
     calib_num_seqs: int = field(default=128, metadata={"help": "Number of calibration sequences."})
     calib_max_length: int = field(default=2048, metadata={"help": "Max token length per calibration sequence."})
+    calib_batch_size: int = field(
+        default=8,
+        metadata={"help": (
+            "Calibration DataLoader batch size. Combined (fwd+bwd) methods run a "
+            "backward pass during calibration and need a smaller batch to fit."
+        )},
+    )
     calib_seed: int = field(default=3, metadata={"help": "Random seed for SVD-LLM-compatible calibration sampling."})
     eval_ppl_after_compression: bool = field(
         default=True,
@@ -243,6 +266,14 @@ class KDDecompositionConfig:
             "help": "BTT trainable-side selector (BTT train modes only): small|large|both.",
             "choices": ["small", "large", "both"],
         },
+    )
+    s_merged_to: Optional[str] = field(
+        default=None,
+        metadata={"help": "BTT SVD-init absorb-side (best-effort); None keeps the compress package default."},
+    )
+    factorize_by_head: bool = field(
+        default=True,
+        metadata={"help": "Align BTT block shapes with attention head structure (default True)."},
     )
 
     def __post_init__(self):
@@ -342,9 +373,13 @@ class KDTrainingConfig:
         default="hellaswag,mmlu",
         metadata={"help": "Comma-separated lm-eval-harness task names to benchmark."},
     )
-    lm_eval_limit: int = field(
-        default=-1,
-        metadata={"help": "Per-task sample cap for lm-eval (<=0 means the full task)."},
+    lm_eval_limit: float = field(
+        default=-1.0,
+        metadata={"help": (
+            "Per-task sample cap for lm-eval. <=0 means the full task; a value "
+            "in (0,1) is treated by lm-eval as a fraction of the task (e.g. 0.05 "
+            "= 5% subset); >=1 is an absolute per-task sample count."
+        )},
     )
     lm_eval_batch_size: int = field(
         default=4,
@@ -357,6 +392,14 @@ class KDTrainingConfig:
     eval_before_compression: bool = field(
         default=True,
         metadata={"help": "Also benchmark the uncompressed base model for a before/after comparison."},
+    )
+    eval_after_compression: bool = field(
+        default=True,
+        metadata={"help": "Run the full lm-eval benchmark right after compression (before any training, step 0)."},
+    )
+    eval_every_steps: int = field(
+        default=0,
+        metadata={"help": "Run the lm-eval benchmark every N optimizer steps during training (0 disables)."},
     )
 
     def __post_init__(self):
@@ -625,7 +668,7 @@ def _build_calib_loader(tokenizer, decomp_args: KDDecompositionConfig, train_com
             tokenizer,
             num_seqs=decomp_args.calib_num_seqs,
             max_length=decomp_args.calib_max_length,
-            batch_size=8,
+            batch_size=decomp_args.calib_batch_size,
             seed=decomp_args.calib_seed,
         )
     if decomp_args.calib_source == "traces":
@@ -634,7 +677,7 @@ def _build_calib_loader(tokenizer, decomp_args: KDDecompositionConfig, train_com
             decomp_args.calib_traces_path,
             num_seqs=decomp_args.calib_num_seqs,
             max_length=decomp_args.calib_max_length,
-            batch_size=8,
+            batch_size=decomp_args.calib_batch_size,
         )
     # training_data
     if not train_completions:
@@ -648,7 +691,7 @@ def _build_calib_loader(tokenizer, decomp_args: KDDecompositionConfig, train_com
         texts,
         num_seqs=decomp_args.calib_num_seqs,
         max_length=decomp_args.calib_max_length,
-        batch_size=8,
+        batch_size=decomp_args.calib_batch_size,
     )
 
 
@@ -672,7 +715,7 @@ def configure_btt_trainability(
     train_bias: bool = True,
 ) -> dict:
     """Freeze all params, then unfreeze BTT cores according to train_position."""
-    from compress.btt_linear import BTTLinear
+    from compress.btt.btt_linear import BTTLinear
 
     for p in model.parameters():
         p.requires_grad = False
@@ -712,6 +755,248 @@ def configure_btt_trainability(
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Mixed per-module compression (compression_rules)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Methods that only apply to the gated-MLP triplet (keyed by down_proj).
+_MLP_ONLY_METHODS = {"nystrom", "nystrom_combined"}
+# Skip sentinels: a rule with one of these methods leaves matched modules dense.
+_NO_COMPRESS_METHODS = {"none", "full", None}
+
+
+def _match_rule(module_name: str, rules):
+    """Return the (method, ratio) of the LAST rule whose regex matches, or None.
+
+    Rules are ordered general -> specific; the last match wins, so a later,
+    more-specific rule overrides an earlier general one.
+    """
+    import re
+
+    chosen = None
+    for rule in rules:
+        pattern = rule.get("pattern")
+        if pattern is None:
+            raise ValueError(f"compression_rules entry missing 'pattern': {rule!r}")
+        if re.search(pattern, module_name):
+            method = rule.get("method", "none")
+            method = method.strip().lower() if isinstance(method, str) else method
+            ratio = float(rule.get("compression_ratio", 1.0))
+            chosen = (method, ratio)
+    return chosen
+
+
+def _plan_compression_rules(model, rules, skip_layers):
+    """Assign each eligible nn.Linear module to a (method, ratio) rule group.
+
+    Returns:
+        assignments: {module_name: (method, ratio)} for modules that will be
+            compressed (skip sentinels and unmatched modules are excluded).
+        unmatched: list of module names with no matching rule (left dense).
+    """
+    import torch.nn as nn
+
+    assignments = {}
+    unmatched = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        if name.split(".")[-1] in skip_layers:
+            continue
+        matched = _match_rule(name, rules)
+        if matched is None:
+            unmatched.append(name)
+            continue
+        method, ratio = matched
+        if method in _NO_COMPRESS_METHODS or ratio >= 1.0:
+            continue  # explicit "do not compress"
+        assignments[name] = (method, ratio)
+    return assignments, unmatched
+
+
+def _mlp_down_proj_names(model, skip_layers):
+    """Names of gated-MLP down_proj modules (nystrom triplet anchors)."""
+    from compress.structured.nystrom import find_mlp_triplets
+
+    names = []
+    for _, _, _, down_name in find_mlp_triplets(model, skip_layers):
+        names.append(down_name)
+    return names
+
+
+def apply_compression_rules(model, calib_loader, rules, skip_layers, device,
+                            decomp_args: "KDDecompositionConfig"):
+    """Apply a mixed per-module compression strategy.
+
+    Groups eligible modules by (method, compression_ratio) and dispatches each
+    group to the corresponding low-level compressor from the `compress` package.
+    Because every ``*_compress_model`` function compresses only the modules whose
+    names appear in the statistics dict it is passed, we drive per-module
+    selection purely by partitioning those dicts — no submodule changes needed.
+
+    Statistics are collected once per calibration "flavour" (forward / backward /
+    both / nystrom-combined) and reused across all groups that need them.
+    """
+    import torch.nn as nn
+    from compress.compress_model import (
+        _CALIB_FREE_METHODS,
+        _BACKWARD_CALIB_METHODS,
+        _BOTH_CALIB_METHODS,
+        _compress_with_covariances,
+        _compress_with_covariances_combined,
+        SUPPORTED_METHOD_SET,
+    )
+    from compress.calibration import (
+        collect_covariances_from_loader,
+        collect_backward_covariances_from_loader,
+        collect_both_covariances_from_loader,
+        collect_nystrom_combined_statistics,
+    )
+    from compress.structured.nystrom import (
+        nystrom_compress_model,
+        nystrom_combined_compress_model,
+    )
+
+    assignments, unmatched = _plan_compression_rules(model, rules, skip_layers)
+    if not assignments:
+        print("[decompose] compression_rules matched no compressible modules; "
+              "model left unchanged.")
+        return model
+
+    # Group module names by (method, ratio).
+    groups = {}
+    for name, (method, ratio) in assignments.items():
+        groups.setdefault((method, ratio), []).append(name)
+
+    # Validate methods and figure out which calibration flavours are required.
+    need_forward = need_backward = need_both = need_nystrom_combined = False
+    for (method, ratio), names in groups.items():
+        if method in _MLP_ONLY_METHODS:
+            if method == "nystrom":
+                need_forward = True  # nystrom uses forward down_proj cov
+            else:
+                need_nystrom_combined = True
+            continue
+        if method not in SUPPORTED_METHOD_SET:
+            raise ValueError(
+                f"compression_rules method {method!r} is not supported. Choose from "
+                f"{sorted(SUPPORTED_METHOD_SET)} or {sorted(_MLP_ONLY_METHODS)} or 'none'."
+            )
+        if method in _CALIB_FREE_METHODS:
+            pass
+        elif method in _BACKWARD_CALIB_METHODS:
+            need_backward = True
+        elif method in _BOTH_CALIB_METHODS:
+            need_both = True
+        else:
+            need_forward = True
+
+    print("[decompose] compression_rules plan:")
+    for (method, ratio), names in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+        print(f"  method={method}, ratio={ratio:.0%}: {len(names)} modules")
+    if unmatched:
+        print(f"  (unmatched / left dense: {len(unmatched)} modules)")
+
+    # ── Collect statistics once per flavour ──────────────────────────────────
+    fwd_cov = bwd_cov = None
+    both_fwd = both_bwd = None
+    nystrom_combined_stats = None
+    if need_forward:
+        print("[decompose] Collecting forward covariances ...")
+        fwd_cov = collect_covariances_from_loader(
+            model, calib_loader, device=device, skip_layers=skip_layers
+        )
+    if need_backward:
+        print("[decompose] Collecting backward covariances ...")
+        bwd_cov = collect_backward_covariances_from_loader(
+            model, calib_loader, device=device, skip_layers=skip_layers
+        )
+    if need_both:
+        print("[decompose] Collecting forward+backward covariances ...")
+        both_fwd, both_bwd = collect_both_covariances_from_loader(
+            model, calib_loader, device=device, skip_layers=skip_layers
+        )
+    if need_nystrom_combined:
+        print("[decompose] Collecting nystrom-combined (C_f, C_b) statistics ...")
+        nystrom_combined_stats = collect_nystrom_combined_statistics(
+            model, calib_loader, device=device, skip_layers=skip_layers
+        )
+
+    down_proj_names = set(_mlp_down_proj_names(model, skip_layers))
+
+    def _subset(cov_dict, names):
+        names = set(names)
+        return {k: v for k, v in cov_dict.items() if k in names} if cov_dict else {}
+
+    # ── Dispatch each group with a filtered statistics dict ──────────────────
+    for (method, ratio), names in groups.items():
+        name_set = set(names)
+        print(f"[decompose] Compressing {len(names)} modules with method={method}, ratio={ratio:.0%} ...")
+
+        if method == "nystrom":
+            # Nystrom is keyed by the triplet's down_proj; restrict to matched triplets.
+            stat = {k: v for k, v in (fwd_cov or {}).items()
+                    if k in down_proj_names and k in name_set}
+            nystrom_compress_model(model, stat, sparsity=1.0 - ratio,
+                                   skip_layers=skip_layers, device=device)
+            continue
+        if method == "nystrom_combined":
+            stat = {k: v for k, v in (nystrom_combined_stats or {}).items()
+                    if k in down_proj_names and k in name_set}
+            nystrom_combined_compress_model(model, stat, sparsity=1.0 - ratio,
+                                            skip_layers=skip_layers, device=device)
+            continue
+
+        if method in _CALIB_FREE_METHODS:
+            # svd/btt: no covariance signal. btt path uses {name: None}.
+            stat = {n: None for n in names}
+            _compress_with_covariances(
+                model, stat, ratio, method, device, skip_layers,
+                btt_decomp_mode=decomp_args.decomp_mode,
+                btt_s_merged_to=decomp_args.s_merged_to,
+                btt_factorize_by_head=decomp_args.factorize_by_head,
+            )
+        elif method in _BACKWARD_CALIB_METHODS:
+            _compress_with_covariances(
+                model, _subset(bwd_cov, names), ratio, method, device, skip_layers,
+                btt_decomp_mode=decomp_args.decomp_mode,
+                btt_s_merged_to=decomp_args.s_merged_to,
+                btt_factorize_by_head=decomp_args.factorize_by_head,
+            )
+        elif method in _BOTH_CALIB_METHODS:
+            _compress_with_covariances_combined(
+                model, _subset(both_fwd, names), _subset(both_bwd, names),
+                ratio, method, device, skip_layers,
+                als_n_iter=decomp_args.als_n_iter,
+                als_tol=decomp_args.als_tol,
+                als_weighting=decomp_args.als_weighting,
+                als_reg_eps=decomp_args.als_reg_eps,
+                twosteps_n_refine=decomp_args.twosteps_n_refine,
+                twosteps_reg_eps=decomp_args.twosteps_reg_eps,
+                btt_decomp_mode=decomp_args.decomp_mode,
+                btt_s_merged_to=decomp_args.s_merged_to,
+                btt_factorize_by_head=decomp_args.factorize_by_head,
+            )
+        else:  # forward-only (svd_llm, svd_llm_v2, btt_llm_v2)
+            _compress_with_covariances(
+                model, _subset(fwd_cov, names), ratio, method, device, skip_layers,
+                btt_decomp_mode=decomp_args.decomp_mode,
+                btt_s_merged_to=decomp_args.s_merged_to,
+                btt_factorize_by_head=decomp_args.factorize_by_head,
+            )
+
+    return model
+
+
+def _rules_use_btt(rules):
+    """True if any compression rule selects a BTT method."""
+    for rule in rules:
+        method = rule.get("method")
+        if isinstance(method, str) and method.strip().lower() in _BTT_TRAIN_MODES:
+            return True
+    return False
+
+
 def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
                     train_completions=None):
     """Decompose a model in-place using BTT/SVD methods.
@@ -719,7 +1004,36 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
     Returns the model unchanged when train_mode='full'.
     For BTT train modes, applies PEFT-style trainability to BTT cores only.
     For non-BTT modes, all parameters are made trainable.
+
+    When ``decomp_args.compression_rules`` is set, applies a mixed per-module
+    strategy (see ``apply_compression_rules``) instead of the single-method path.
     """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    skip_layers = tuple(s.strip() for s in decomp_args.skip_layers.split(",") if s.strip())
+
+    # ── Mixed per-module strategy ─────────────────────────────────────────────
+    if decomp_args.compression_rules:
+        rules = decomp_args.compression_rules
+        print(f"[decompose] Building calibration loader (source={decomp_args.calib_source}) ...")
+        calib_loader = _build_calib_loader(tokenizer, decomp_args, train_completions=train_completions)
+        apply_compression_rules(model, calib_loader, rules, skip_layers, device, decomp_args)
+
+        if _rules_use_btt(rules):
+            stats = configure_btt_trainability(
+                model, train_position=decomp_args.train_position, train_bias=True,
+            )
+            if stats["num_btt_layers"] == 0:
+                raise ValueError("No BTT layers found after rules-based decomposition using a BTT method.")
+            print("[decompose] Done (rules). Applied BTT trainability controls:")
+            print(
+                f"  trainable params: {stats['trainable_param_count']:,} / {stats['total_param_count']:,} "
+                f"({100.0 * stats['trainable_param_count'] / max(1, stats['total_param_count']):.4f}%)"
+            )
+        else:
+            model.requires_grad_(True)
+            print("[decompose] Done (rules). All parameters set trainable.")
+        return model
+
     if decomp_args.train_mode not in _VALID_TRAIN_MODES:
         raise ValueError(
             f"train_mode must be one of {sorted(_VALID_TRAIN_MODES)}, got {decomp_args.train_mode!r}"
@@ -729,8 +1043,6 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
         return model
 
     from compress.compress_model import compress_model_with_loader
-
-    skip_layers = tuple(s.strip() for s in decomp_args.skip_layers.split(",") if s.strip())
 
     if decomp_args.train_mode in _CALIB_FREE_TRAIN_MODES:
         calib_loader = None
@@ -1135,10 +1447,17 @@ def _flatten_lm_eval_metrics(raw_results: dict) -> dict:
     lm-eval returns a nested {task_name: {metric,stderr,...}} structure. We keep
     the main accuracy-style metric per task (acc_norm preferred, then acc), so
     the before/after comparison is a flat, readable mapping.
+
+    MMLU per-category subtask scores (``mmlu_<category>``, e.g. ``mmlu_stem``,
+    ``mmlu_professional_law``) are dropped — only the aggregate ``mmlu`` score is
+    kept — to avoid cluttering W&B with 57+ per-category series.
     """
     flat = {}
     for task, metrics in raw_results.items():
         if not isinstance(metrics, dict):
+            continue
+        # Skip MMLU subcategory breakdowns; keep only the overall "mmlu" score.
+        if task.startswith("mmlu_"):
             continue
         value = None
         for key in ("acc_norm,none", "acc,none", "acc_norm", "acc", "exact_match,none", "exact_match"):
@@ -1284,9 +1603,25 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
         wandb.define_metric("train/step")
         wandb.define_metric("train/*", step_metric="train/step")
         wandb.define_metric("val/*", step_metric="train/step")
+        wandb.define_metric("eval/*", step_metric="train/step")
         wandb.define_metric("ppl/*")
 
     print(f"Run directory: {run_dir}")
+
+    # Benchmark history keyed by training step: {step: {metric: value}}.
+    # step -1 = uncompressed baseline, 0 = right after compression, N>0 = after N steps.
+    eval_history = {}
+
+    def _benchmark_at(step, tag):
+        """Run the benchmark, record it in eval_history, and log to W&B."""
+        print(f"[bench] === {tag} (step {step}) ===")
+        metrics = run_benchmark(
+            model, tokenizer, script_args.model_name_or_path, kd_args, device
+        )
+        eval_history[step] = metrics
+        if use_wandb:
+            wandb.log({f"eval/{k}": v for k, v in metrics.items()} | {"train/step": max(step, 0)})
+        return metrics
 
     # ── Load teacher data (skipped for ce mode) ───────────────────────────────
     teacher_config = None
@@ -1318,16 +1653,15 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     # ── Baseline benchmark (uncompressed model) ───────────────────────────────
     baseline_metrics = None
     if kd_args.run_lm_eval and kd_args.eval_before_compression:
-        print("[bench] Benchmarking base (uncompressed) model ...")
-        baseline_metrics = run_benchmark(
-            model, tokenizer, script_args.model_name_or_path, kd_args, device
-        )
-        if use_wandb:
-            wandb.log({f"baseline/{k}": v for k, v in baseline_metrics.items()})
+        baseline_metrics = _benchmark_at(-1, "base (uncompressed) model")
 
     # ── Decompose ─────────────────────────────────────────────────────────────
     model = decompose_model(model, tokenizer, decomp_args, train_completions=train_completions)
     compression_ppl_results = None
+
+    # ── Benchmark right after compression (step 0, before training) ───────────
+    if kd_args.run_lm_eval and kd_args.eval_after_compression:
+        _benchmark_at(0, "after compression, before training")
 
     if decomp_args.train_mode != "full" and decomp_args.eval_ppl_after_compression:
         print(
@@ -1526,6 +1860,17 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
                 if (not disable_ckpt_saving) and optimizer_step in save_steps:
                     save_kd_checkpoint(model, run_dir, optimizer_step)
 
+                # Periodic benchmark during training (skip the final step here;
+                # the end-of-training benchmark below covers it).
+                if (
+                    kd_args.run_lm_eval
+                    and kd_args.eval_every_steps > 0
+                    and optimizer_step % kd_args.eval_every_steps == 0
+                    and optimizer_step < num_training_steps
+                ):
+                    _benchmark_at(optimizer_step, f"after {optimizer_step} training steps")
+                    model.train()
+
                 if kd_args.kd_loss_type == "ce" and optimizer_step >= num_training_steps:
                     break
 
@@ -1574,15 +1919,14 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
 
     # ── Final benchmark (after compress + train) + comparison ─────────────────
     if kd_args.run_lm_eval:
-        print("[bench] Benchmarking compressed + fine-tuned model ...")
-        final_metrics = run_benchmark(
-            model, tokenizer, script_args.model_name_or_path, kd_args, device
-        )
+        final_metrics = _benchmark_at(optimizer_step, "compressed + fine-tuned model (final)")
         if use_wandb:
             wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
 
         _print_benchmark_comparison(baseline_metrics, final_metrics)
 
+        # Serialize the full benchmark curve keyed by step:
+        #   -1 = uncompressed baseline, 0 = post-compression, N = after N steps.
         os.makedirs(run_dir, exist_ok=True)
         bench_path = os.path.join(run_dir, "benchmark_comparison.json")
         with open(bench_path, "w", encoding="utf-8") as f:
@@ -1591,10 +1935,12 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
                     "model": script_args.model_name_or_path,
                     "train_mode": decomp_args.train_mode,
                     "compression_ratio": decomp_args.compression_ratio,
+                    "compression_rules": decomp_args.compression_rules,
                     "kd_loss_type": kd_args.kd_loss_type,
                     "tasks": kd_args.lm_eval_tasks,
                     "before_compression": baseline_metrics,
                     "after_compress_train": final_metrics,
+                    "history": {str(step): m for step, m in sorted(eval_history.items())},
                 },
                 f,
                 indent=2,
@@ -1628,6 +1974,11 @@ def parse_args_and_config(dataclass_types):
 
     parser = HfArgumentParser(dataclass_types)
 
+    # Complex (list/dict) config fields that argparse cannot represent as CLI
+    # flags; these are popped from the YAML and injected onto the dataclasses
+    # after parsing (see _COMPLEX_CONFIG_FIELDS below).
+    complex_values = {}
+
     if known.config:
         import yaml
 
@@ -1635,6 +1986,9 @@ def parse_args_and_config(dataclass_types):
             yaml_defaults = yaml.safe_load(f) or {}
         if not isinstance(yaml_defaults, dict):
             raise ValueError(f"Config {known.config!r} must contain a top-level mapping.")
+        for field_name in _COMPLEX_CONFIG_FIELDS:
+            if field_name in yaml_defaults:
+                complex_values[field_name] = yaml_defaults.pop(field_name)
         # YAML values become argparse defaults; CLI flags below override them.
         parser.set_defaults(**yaml_defaults)
         # Fields supplied by the YAML are no longer required on the CLI.
@@ -1642,7 +1996,20 @@ def parse_args_and_config(dataclass_types):
             if action.dest in yaml_defaults:
                 action.required = False
 
-    return parser.parse_args_into_dataclasses(args=remaining)
+    parsed = parser.parse_args_into_dataclasses(args=remaining)
+
+    # Inject complex fields onto whichever dataclass declares them.
+    for field_name, value in complex_values.items():
+        for dc in parsed:
+            if hasattr(dc, field_name):
+                setattr(dc, field_name, value)
+                break
+
+    return parsed
+
+
+# Config keys that are structured (list/dict) and bypass the argparse CLI layer.
+_COMPLEX_CONFIG_FIELDS = ("compression_rules",)
 
 
 if __name__ == "__main__":

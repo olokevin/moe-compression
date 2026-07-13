@@ -76,14 +76,21 @@ class FakePruneMaskedMoEExpert(nn.Module):
             Output tensor of shape [*, hidden_dim]
         """
         original_dtype = x.dtype
-        
+
+        # Intermediate-dimension mask (shape [inter_dim]); multiply the SwiGLU
+        # intermediate activation by 0/1 so pruned channels contribute nothing
+        # while gradients still flow (fake pruning). This mirrors the standard
+        # MoE expert forward: down_proj(act(gate_proj(x)) * up_proj(x)).
         mi = self._get_masks(x)
-        out = self.expert.down_proj(x)
-        out = out * mi
-        
+        gate = self.expert.gate_proj(x)
+        up = self.expert.up_proj(x)
+        inter = self.act(gate) * up
+        inter = inter * mi
+        out = self.expert.down_proj(inter)
+
         if out.dtype != original_dtype:
             out = out.to(original_dtype)
-        
+
         return out
     
     def __getattr__(self, name: str):

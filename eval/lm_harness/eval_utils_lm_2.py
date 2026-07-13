@@ -84,68 +84,35 @@ class BaseLM(LM):
         """
         requests: List[(context, continuation)]
         Returns: List[(logprob, is_greedy)]
+
+        Batched over self.batch_size: requests are pre-tokenized, sorted by total
+        length (to minimize padding), then processed in padded batches with a single
+        forward per batch. Per-request scoring is identical to the original
+        one-at-a-time logic (left-truncate context, score continuation tokens),
+        just vectorized — this is what makes 30B eval tractable.
         """
-        res = []
-
         max_len = self.max_length
-        pbar = tqdm(total=len(requests), desc="Loglikelihood", dynamic_ncols=True, miniters=1, leave=False)
-        for inst in requests:
-            # In lm-eval, inst.args is usually (context, continuation)
+        bs = max(1, int(self.batch_size))
+
+        # 1) Pre-tokenize every request, recording where each continuation is scored.
+        prepared = []  # (orig_idx, input_ids, start_logit_idx, cont_ids_for_score)
+        results = [None] * len(requests)
+        for i, inst in enumerate(requests):
             context, continuation = inst.args
+            ctx_ids = self.tokenizer(context, add_special_tokens=False)["input_ids"]
+            cont_ids = self.tokenizer(continuation, add_special_tokens=False)["input_ids"]
 
-            # Don't strip, leading spaces in multiple choice questions will be removed
-            # Tokenize separately
-            ctx_ids = self.tokenizer(
-                context,
-                add_special_tokens=False,
-            )["input_ids"]
-
-            cont_ids = self.tokenizer(
-                continuation,
-                add_special_tokens=False,
-            )["input_ids"]
-
-            # Empty continuation case, return 0 directly
             if len(cont_ids) == 0:
-                res.append((0.0, True))
+                results[i] = (0.0, True)
                 continue
 
-            # Left truncate context to ensure continuation is fully preserved
             total_len = len(ctx_ids) + len(cont_ids)
             if total_len > max_len:
                 overflow = total_len - max_len
-                # Only truncate left side of context
-                if overflow >= len(ctx_ids):
-                    # Extreme case: entire context is truncated
-                    ctx_ids = []
-                else:
-                    ctx_ids = ctx_ids[overflow:]
+                ctx_ids = [] if overflow >= len(ctx_ids) else ctx_ids[overflow:]
 
-            # Recalculate length
             ctx_len = len(ctx_ids)
-            cont_len = len(cont_ids)
-
-            input_ids = ctx_ids + cont_ids
-            input_ids = torch.tensor([input_ids], device=self.device)
-            attention_mask = torch.ones_like(input_ids, device=self.device)
-
-            with torch.no_grad():
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                )
-                # logits: [1, L, V], predict x_{t+1}
-                logits = outputs.logits[:, :-1, :]  # [1, L-1, V]
-                logprobs = torch.log_softmax(logits, dim=-1)
-
-            # Continuation tokens in input_ids are at positions:
-            # [ctx_len, ctx_len + cont_len)
-            # Corresponding logits indices are [ctx_len - 1, ctx_len + cont_len - 1)
             if ctx_len == 0:
-                # Extreme case with no context:
-                # First continuation token has no previous token's logits
-                # Common practice: start from second continuation token
                 start_logit_idx = 0
                 cont_ids_for_score = cont_ids[1:]
             else:
@@ -153,22 +120,81 @@ class BaseLM(LM):
                 cont_ids_for_score = cont_ids
 
             if len(cont_ids_for_score) == 0:
-                res.append((0.0, True))
+                results[i] = (0.0, True)
                 continue
 
-            end_logit_idx = start_logit_idx + len(cont_ids_for_score)
+            prepared.append((i, ctx_ids + cont_ids, start_logit_idx, cont_ids_for_score))
 
-            lp_seq = logprobs[0, start_logit_idx:end_logit_idx, :]  # [T, V]
+        # 2) Sort by sequence length so batches pad to similar lengths.
+        prepared.sort(key=lambda t: len(t[1]))
 
-            cont_ids_t = torch.tensor(cont_ids_for_score, device=self.device)
-            token_lp = lp_seq.gather(-1, cont_ids_t.unsqueeze(-1)).squeeze(-1)
-            lp_sum = float(token_lp.sum().item())
+        pbar = tqdm(total=len(prepared), desc="Loglikelihood", dynamic_ncols=True,
+                    miniters=1, leave=False)
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id or 0
 
-            # is_greedy can be True here, lm-eval multiple choice mode only uses logprob
-            res.append((lp_sum, True))
-            pbar.update(1)
+        for batch in chunks(prepared, bs):
+            maxlen = max(len(item[1]) for item in batch)
+            input_ids = torch.full((len(batch), maxlen), pad_id, dtype=torch.long)
+            attention_mask = torch.zeros((len(batch), maxlen), dtype=torch.long)
+            for r, (_, ids, _, _) in enumerate(batch):
+                # Left-pad so continuation tokens keep aligned end positions per row.
+                input_ids[r, maxlen - len(ids):] = torch.tensor(ids, dtype=torch.long)
+                attention_mask[r, maxlen - len(ids):] = 1
+
+            input_ids = input_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+                logits = outputs.logits[:, :-1, :]
+
+                # Gather only the continuation-position logits across the whole batch,
+                # then do ONE log_softmax on that compact tensor. This avoids both the
+                # OOM of a full [batch, seq, vocab] float32 softmax (7+ GB for long
+                # 5-shot MMLU contexts, vocab ~152k) and the per-row Python overhead
+                # of softmaxing each row separately. Continuation lengths are tiny
+                # (1 token for MMLU choices), so the gathered tensor is a few MB.
+                rows = []      # index of logits rows to keep
+                positions = []  # flat (row, pos) via advanced indexing
+                slices = []     # (orig_idx, start_in_cat, n, cont_ids)
+                cat_row_idx = []
+                cat_pos_idx = []
+                cursor = 0
+                for r, (orig_idx, ids, start_logit_idx, cont_ids_for_score) in enumerate(batch):
+                    left_pad = maxlen - len(ids)
+                    s = left_pad + start_logit_idx
+                    n = len(cont_ids_for_score)
+                    for p in range(s, s + n):
+                        cat_row_idx.append(r)
+                        cat_pos_idx.append(p)
+                    slices.append((orig_idx, cursor, n, cont_ids_for_score))
+                    cursor += n
+
+                row_t = torch.tensor(cat_row_idx, device=self.device)
+                pos_t = torch.tensor(cat_pos_idx, device=self.device)
+                sel = logits[row_t, pos_t, :].float()          # [sum_cont, vocab]
+                cat_lp = torch.log_softmax(sel, dim=-1)         # small
+                tok_t = torch.tensor(
+                    [t for (_, _, _, cont) in slices for t in cont],
+                    device=self.device,
+                )
+                gathered = cat_lp.gather(-1, tok_t.unsqueeze(-1)).squeeze(-1)  # [sum_cont]
+
+            gathered_cpu = gathered.cpu()
+            for orig_idx, start_in_cat, n, _ in slices:
+                lp_sum = float(gathered_cpu[start_in_cat:start_in_cat + n].sum().item())
+                results[orig_idx] = (lp_sum, True)
+            pbar.update(len(batch))
         pbar.close()
-        return res
+
+        # Any request skipped above (empty continuation) already has a result.
+        return [r if r is not None else (0.0, True) for r in results]
 
     def generate_until(self, requests):
         outputs = []
@@ -575,6 +601,11 @@ class LMEvalAdaptor(BaseLM):
     
     @property
     def max_length(self):
+        # Honour an explicitly-passed cap first: models like Qwen3 report
+        # max_position_embeddings=262144, which would make c4 rolling-PPL windows
+        # enormous (OOM). eval_fn passes eval_max_len/max_seq_length here.
+        if getattr(self, "_max_length", -1) and self._max_length > 0:
+            return self._max_length
         try:
             return self.gpt2.config.n_ctx
         except AttributeError:

@@ -67,7 +67,7 @@ def build_training_args(args) -> TrainingArguments:
         gate_param_keywords=getattr(args, "gate_param_keywords", None),
         enable_gate_lora=getattr(args, "enable_gate_lora", False),
         optim=getattr(args, "optim", "adamw"),
-        eval_on_start=True, 
+        eval_on_start=getattr(args, "eval_on_start", True),
     )
     accepted_kwargs = {}
     extra_kwargs = {}

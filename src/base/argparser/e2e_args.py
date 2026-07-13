@@ -82,6 +82,7 @@ class E2EArguments:  # Prune & Train Arguments
     gradient_checkpointing_kwargs: Dict = field(default_factory=lambda: {"use_reentrant": False}, metadata={"help": "Keyword arguments for gradient checkpointing."})
     overwrite_output_dir: bool = field(default=True, metadata={"help": "Whether to overwrite the output directory."})
     eval_strategy: Optional[str] = field(default=None, metadata={"help": "HF Trainer evaluation strategy override."})
+    eval_on_start: bool = field(default=True, metadata={"help": "Run one eval before training starts (HF Trainer eval_on_start)."})
     save_strategy: Optional[str] = field(default=None, metadata={"help": "HF Trainer save strategy override."})
     save_total_limit: int = field(default=3, metadata={"help": "Maximum checkpoints to keep when saving."})
     dataloader_pin_memory: bool = field(default=True, metadata={"help": "Whether the dataloader should pin memory."})

@@ -132,10 +132,17 @@ def get_model(args, max_memory = None, device_map = None):
             
     # use auto to let model switch to multiple GPUs, use when testing, use get_kbit_device_map() when training
     num_gpus = int(getattr(args, "num_gpus", torch.cuda.device_count()))
-    per_gpu_mem = getattr(args, "per_gpu_mem", "95GiB")
+    # per-GPU memory cap for accelerate's 'auto' device_map. Overridable via env so a
+    # model larger than one GPU can be sharded across several (e.g. 61GB Qwen3-30B on
+    # 40GB A100s: set PER_GPU_MEM=36GiB). Default keeps prior single-GPU-friendly value.
+    per_gpu_mem = getattr(args, "per_gpu_mem", None) or os.environ.get("PER_GPU_MEM", "95GiB")
     max_memory = _get_max_memory(num_gpus, per_gpu=per_gpu_mem) if max_memory is None else max_memory
-    
-    if num_gpus > 1 and args.test_only:  # use auto when testing, use get_kbit_device_map() when training
+
+    # Force 'auto' sharding (across all visible GPUs) when the model can't fit on one,
+    # even outside test_only (e.g. channel scoring on a 30B model). Env-gated to avoid
+    # changing the default training path (which relies on per-rank DDP replicas).
+    force_shard = os.environ.get("FORCE_DEVICE_MAP_AUTO", "0") == "1"
+    if num_gpus > 1 and (args.test_only or force_shard):  # 'auto' when testing/sharding; get_kbit_device_map() when DDP training
         device_map = 'auto'
     else:
         device_map = get_kbit_device_map() if device_map is None else device_map  # get current cuda

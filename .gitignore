@@ -2,7 +2,9 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,jupyternotebooks
 
 ### user
-docs/
+worktrees/
+run_results/
+papers/
 ckpts/
 outputs/
 results/

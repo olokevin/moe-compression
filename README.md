@@ -1,7 +1,7 @@
 # Attribution-Guided and Coverage-Maximized Pruning for Structural MoE Compression
 
-> **[Attribution-Guided and Coverage-Maximized Pruning for Structural MoE Compression](https://openreview.net/pdf?id=oreET6Wz52)**  
-> Yifu Ding, Jiacheng Wang, Ge Yang, Yongcheng Jing, Jinyang Guo, Xianglong Liu, Dacheng Tao  
+> **[Attribution-Guided and Coverage-Maximized Pruning for Structural MoE Compression](https://openreview.net/pdf?id=oreET6Wz52)**
+> Yifu Ding, Jiacheng Wang, Ge Yang, Yongcheng Jing, Jinyang Guo, Xianglong Liu, Dacheng Tao
 > *Forty-Third International Conference on Machine Learning (ICML 2026) — **Spotlight***
 
 ---
@@ -19,12 +19,12 @@ Our method operates in four stages:
 
 ### Supported Models
 
-| Model | Parameters (Total / Active) |
-|---|---|
-| Qwen1.5-MoE-A2.7B | 14.3B / 2.7B |
-| DeepSeek-MoE-16B | 16.4B / 2.8B |
-| DeepSeek-V2-Lite | 15.7B / 2.4B |
-| Qwen3-30B-A3B | 30.5B / 3.3B |
+| Model             | Parameters (Total / Active) |
+| ----------------- | --------------------------- |
+| Qwen1.5-MoE-A2.7B | 14.3B / 2.7B                |
+| DeepSeek-MoE-16B  | 16.4B / 2.8B                |
+| DeepSeek-V2-Lite  | 15.7B / 2.4B                |
+| Qwen3-30B-A3B     | 30.5B / 3.3B                |
 
 ---
 
@@ -58,11 +58,11 @@ The framework runs in three stages that map directly onto the paper's method
  calibration         scores/  mask generation + LoRA   ckpt  + benchmarks
 ```
 
-| Paper component | Where it runs | Config knob |
-|---|---|---|
+| Paper component                                         | Where it runs                               | Config knob                               |
+| ------------------------------------------------------- | ------------------------------------------- | ----------------------------------------- |
 | **Attribution-Guided Loss Approximation** (§4.1) | `src/calibration/channel_scoring/main.py` | `--calib-datasets`, `--calib-batches` |
-| **Coverage-Maximized Budget Allocation** (§4.2) | `generate_masks()` during train/eval | `prune_kwargs.mask_method_kwargs` |
-| **Alignment-Aware Redistribution** (§4.3) | `generate_masks()` during train/eval | `prune_kwargs.adjust_masks_kwargs` |
+| **Coverage-Maximized Budget Allocation** (§4.2)  | `generate_masks()` during train/eval      | `prune_kwargs.mask_method_kwargs`       |
+| **Alignment-Aware Redistribution** (§4.3)        | `generate_masks()` during train/eval      | `prune_kwargs.adjust_masks_kwargs`      |
 
 ### 1. Attribution-Guided Loss Approximation (ALA)
 

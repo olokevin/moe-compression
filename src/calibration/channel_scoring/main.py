@@ -37,7 +37,15 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
     
     for layer_idx in tqdm(range(L), desc="Processing"):
         teacher_block = model.model.layers[layer_idx]
-        copied_block = deepcopy(teacher_block).to(device=args.device, dtype=args.dtype)
+        copied_block = deepcopy(teacher_block)
+        # When the base model is sharded via accelerate (device_map='auto'), each
+        # module carries an AlignDevicesHook that re-pins its I/O to the shard's
+        # device. deepcopy keeps those hooks, so the copy fights our .to(device)
+        # and submodules end up on mismatched devices. Strip them before moving.
+        if getattr(model, "hf_device_map", None) is not None:
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(copied_block, recurse=True)
+        copied_block = copied_block.to(device=args.device, dtype=args.dtype)
         copied_mlp = copied_block.mlp
         if not _is_moe_block(copied_mlp):
             continue
@@ -46,15 +54,15 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
             args.alpha = 0.9
         _patch_block_alpha_if_needed(copied_block, E=E, args=args)
 
-        total_loss = block_forward(model, 
-                      copied_block, 
+        total_loss = block_forward(model,
+                      copied_block,
                       layer_idx,
-                      calib_dataset, 
-                      tokenizer, 
+                      calib_dataset,
+                      tokenizer,
                       max_seq_length=args.max_seq_length,
                       saliency_ema=0.9,
-                      batch_size=args.batch_size, 
-                      calib_batches=args.calib_batches,  
+                      batch_size=args.batch_size,
+                      calib_batches=args.calib_batches,
                       device=args.device,
                       dtype=args.dtype,
                       verbose=verbose)
@@ -128,7 +136,7 @@ def main(args, model, tokenizer, output_dir, calib_dataset, verbose=False):
         expert_scores["weight"][layer_idx] = _layer_norm(expert_scores["weight"][layer_idx])
         expert_scores["token_contrib"][layer_idx] = _layer_norm(expert_scores["token_contrib"][layer_idx])
         expert_scores["expert_out_token_contrib"][layer_idx] = expert_scores["expert_out_token_contrib"][layer_idx]
-       
+
     torch.save(gate_scores, os.path.join(output_dir, "gate_scores.pth"))
     torch.save(expert_scores, os.path.join(output_dir, "expert_scores.pth"))
     layerwise_loss = torch.tensor(layerwise_loss, dtype=torch.float32, device=args.device)

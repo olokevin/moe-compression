@@ -1,0 +1,37 @@
+# Baseline (uncompressed) Qwen3-30B-A3B — MMLU (5-shot).
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+max_steps: null
+log_every_n_steps: 5
+eval_every_n_steps: 20
+save_every_n_steps: 20
+
+eval_sample_limit: 50
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.0
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_baseline_mmlu
+scores_dir: ""
+
+attn_implementation: "sdpa"
