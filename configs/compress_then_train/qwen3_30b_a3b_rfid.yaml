@@ -1,0 +1,74 @@
+# RFID-MoE one-shot decomposition of Qwen3-30B-A3B (residual OMITTED).
+#
+# RFID = MoBE + frequency grouping + effective-rank + adaptive per-group rank
+# allocation. Experts are sorted by routing frequency (collected from a small
+# C4 calibration set), split into m=32 groups; each group gets its own basis at
+# an adaptively-allocated rank K_g. compression_ratio=0.625 is the RETAIN
+# fraction of the up+gate params, which yields ~25% reduction of the total
+# MoE-layer parameters (down_proj left dense) — matched to the MoBE run.
+#
+# Launch on A100-New with sharding env flags (see qwen3-30b-on-40gb-a100 memory):
+#   FORCE_DEVICE_MAP_AUTO=1 PER_GPU_MEM=36GiB ATTN_IMPLEMENTATION=sdpa \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+model_name_or_path: Qwen/Qwen3-30B-A3B
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── RFID-MoE decomposition ────────────────────────────────────────────────────
+train_mode: rfid
+compression_ratio: 0.625         # RETAIN fraction of up+gate -> ~25% total MoE reduction
+moe_basis_count: 32              # m — frequency groups (== shared bases / layer/type)
+moe_fit_iters: 3000              # Adam steps (epochs) per (layer,type,group); reference uses 30000
+moe_fit_lr: 0.07
+moe_fit_patience: 0              # 0 = fixed epochs, matching the reference trainer
+moe_z_norm: true                 # reference std-only normalization (no mean subtraction)
+moe_fit_log_every: 500
+# Auto-save after compression: <run_dir>/compressed_model/{mobe_native, hf_reconstructed}.
+# hf_reconstructed/ loads directly with AutoModelForCausalLM (lm-eval, vLLM).
+moe_save_native: true
+moe_save_hf_reconstructed: true
+rfid_xi: 0.8                     # C_g = xi*E_g + (1-xi)*F_g
+rfid_residual: false             # residual reconstruction NOT implemented
+
+# ── Calibration for routing counts (rfid needs this; wikitext-2 per paper) ────
+calib_source: c4
+calib_num_seqs: 128
+calib_max_length: 1024
+calib_batch_size: 4
+calib_seed: 3
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+# ── One-shot: decompose + eval only, NO recovery training ─────────────────────
+kd_loss_type: ce                 # required field; unused when one_shot_eval_only
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── Benchmarking: hellaswag (0-shot) + mmlu (5-shot), PPL on wikitext2/c4 ─────
+# Full tasks, one eval call per task (per-task few-shot), matching the standalone
+# eval protocol in docs/results/attribution_guided/nystrom.md. Baseline skips the
+# expensive uncompressed MMLU (identical to MoBE's baseline / nystrom-doc 82.0).
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: true
+baseline_skip_tasks: mmlu
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1                # full tasks (HellaSwag 10042, MMLU 14042 x 57)
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048

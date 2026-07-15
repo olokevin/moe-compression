@@ -81,8 +81,13 @@ _VALID_TRAIN_MODES = {
     "btt_llm_v2_bp",
     "btt_llm_v2_combined",
     "btt_twosteps",
+    "mobe",
+    "rfid",
 }
-_CALIB_FREE_TRAIN_MODES = {"svd", "btt"}  # do not need calibration data
+# MoE-only expert basis decomposition (MoBE / RFID-MoE). mobe is data-free;
+# rfid needs calibration data only to collect expert routing counts.
+_MOE_ONLY_TRAIN_MODES = {"mobe", "rfid"}
+_CALIB_FREE_TRAIN_MODES = {"svd", "btt", "mobe"}  # do not need calibration data
 _VALID_CALIB_SOURCES = {"c4", "traces", "training_data"}
 _VALID_KD_LOSS_TYPES = {"sft", "kl", "kl_online", "ce"}
 _VALID_OPTIMIZERS = {"adamw", "adamw_8bit"}
@@ -157,6 +162,8 @@ class KDDecompositionConfig:
                 "btt_llm_v2_bp",
                 "btt_llm_v2_combined",
                 "btt_twosteps",
+                "mobe",
+                "rfid",
             ],
         },
     )
@@ -275,6 +282,62 @@ class KDDecompositionConfig:
         default=True,
         metadata={"help": "Align BTT block shapes with attention head structure (default True)."},
     )
+    # ── MoBE / RFID-MoE basis decomposition knobs ────────────────────────────
+    moe_basis_count: int = field(
+        default=32,
+        metadata={"help": "Number of shared basis matrices m per MoE layer (mobe) / frequency groups (rfid)."},
+    )
+    moe_basis_rank: Optional[int] = field(
+        default=None,
+        metadata={"help": "Basis rank r (mobe). Defaults to the MoE intermediate size p when unset."},
+    )
+    moe_fit_iters: int = field(
+        default=30000,
+        metadata={"help": "Adam steps (epochs) for the weight-space basis fit (mobe/rfid). Reference: 30000."},
+    )
+    moe_fit_lr: float = field(
+        default=0.07,
+        metadata={"help": "Adam learning rate for the basis fit (mobe/rfid)."},
+    )
+    moe_fit_patience: int = field(
+        default=0,
+        metadata={"help": (
+            "Early-stop patience (steps) on the basis-fit loss. 0 = disabled "
+            "(fixed epochs, matching the reference trainer)."
+        )},
+    )
+    moe_z_norm: bool = field(
+        default=True,
+        metadata={"help": "Apply reference std-only normalization (scale by global sigma, fold into A; no mean subtraction)."},
+    )
+    moe_fit_log_every: int = field(
+        default=1000,
+        metadata={"help": "Log the basis-fit loss every N steps (0 disables per-step logging)."},
+    )
+    rfid_xi: float = field(
+        default=0.8,
+        metadata={"help": "RFID fusion weight xi: C_g = xi*E_g + (1-xi)*F_g (rfid only)."},
+    )
+    rfid_residual: bool = field(
+        default=False,
+        metadata={"help": "RFID residual reconstruction (§3.4). Not implemented; must stay False."},
+    )
+    moe_save_native: bool = field(
+        default=True,
+        metadata={"help": (
+            "For mobe/rfid: after compression, auto-save a compact native "
+            "factorized checkpoint (mobe_native/) AND a materialized HF "
+            "checkpoint (hf_reconstructed/) under <run_dir>/compressed_model/."
+        )},
+    )
+    moe_save_hf_reconstructed: bool = field(
+        default=True,
+        metadata={"help": (
+            "For mobe/rfid: also emit the materialized standard-HF checkpoint "
+            "that AutoModelForCausalLM / lm-eval load directly. Requires "
+            "moe_save_native. Set false to save only the compact native form."
+        )},
+    )
 
     def __post_init__(self):
         if self.train_mode not in _VALID_TRAIN_MODES:
@@ -314,6 +377,13 @@ class KDDecompositionConfig:
                 raise ValueError(
                     f"train_position must be one of {sorted(_VALID_BTT_TRAIN_POSITIONS)} for BTT train modes, "
                     f"got {self.train_position!r}"
+                )
+        if self.train_mode in _MOE_ONLY_TRAIN_MODES:
+            if self.moe_basis_count <= 0:
+                raise ValueError(f"moe_basis_count must be > 0, got {self.moe_basis_count}")
+            if self.rfid_residual:
+                raise ValueError(
+                    "rfid_residual is not implemented in this build; set it to false."
                 )
 
 
@@ -393,9 +463,26 @@ class KDTrainingConfig:
         default=True,
         metadata={"help": "Also benchmark the uncompressed base model for a before/after comparison."},
     )
+    baseline_skip_tasks: str = field(
+        default="",
+        metadata={"help": (
+            "Comma-separated lm-eval tasks to SKIP in the uncompressed-baseline "
+            "benchmark only (e.g. 'mmlu' to avoid the expensive 5-shot MMLU baseline). "
+            "Post-compression eval still runs all tasks."
+        )},
+    )
     eval_after_compression: bool = field(
         default=True,
         metadata={"help": "Run the full lm-eval benchmark right after compression (before any training, step 0)."},
+    )
+    one_shot_eval_only: bool = field(
+        default=False,
+        metadata={"help": (
+            "One-shot decompose + eval, NO recovery training. Runs baseline + "
+            "post-compression lm-eval + PPL, writes benchmark_comparison.json, then "
+            "exits before building datasets / optimizer. Used for MoBE/RFID data-free "
+            "decomposition where a backward pass over the sharded model would OOM."
+        )},
     )
     eval_every_steps: int = field(
         default=0,
@@ -1053,6 +1140,18 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
 
     print(f"[decompose] Compressing with method={decomp_args.train_mode}, "
           f"ratio={decomp_args.compression_ratio:.0%} ...")
+    moe_kwargs = None
+    if decomp_args.train_mode in _MOE_ONLY_TRAIN_MODES:
+        moe_kwargs = {
+            "m": decomp_args.moe_basis_count,
+            "r": decomp_args.moe_basis_rank,
+            "iters": decomp_args.moe_fit_iters,
+            "lr": decomp_args.moe_fit_lr,
+            "patience": decomp_args.moe_fit_patience,
+            "z_norm": decomp_args.moe_z_norm,
+            "log_every": decomp_args.moe_fit_log_every,
+            "xi": decomp_args.rfid_xi,
+        }
     compress_model_with_loader(
         model,
         calib_loader,
@@ -1067,6 +1166,7 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
         twosteps_n_refine=decomp_args.twosteps_n_refine,
         twosteps_reg_eps=decomp_args.twosteps_reg_eps,
         btt_decomp_mode=decomp_args.decomp_mode,
+        moe_kwargs=moe_kwargs,
     )
 
     if decomp_args.train_mode in _BTT_TRAIN_MODES:
@@ -1476,12 +1576,24 @@ def _flatten_lm_eval_metrics(raw_results: dict) -> dict:
     return flat
 
 
-def run_benchmark(model, tokenizer, model_name, kd_args: "KDTrainingConfig", device):
+# Per-task few-shot counts. Each task runs in its OWN eval_tasks call so the
+# few-shot count is correct per task (hellaswag 0-shot, mmlu 5-shot) — matching
+# the standalone eval protocol used elsewhere in the repo (docs/results/...).
+_TASK_NUM_FEWSHOT = {"mmlu": 5}
+
+
+def run_benchmark(model, tokenizer, model_name, kd_args: "KDTrainingConfig", device,
+                  skip_tasks=()):
     """Run C4/WikiText PPL + lm-eval-harness tasks; return a flat metrics dict.
 
-    Keys are prefixed: ``ppl/<dataset>`` and ``lm_eval/<task>``.
+    Keys are prefixed: ``ppl/<dataset>`` and ``lm_eval/<task>``. Each lm-eval
+    task is evaluated in a *separate* ``eval_tasks`` call with its own few-shot
+    count (``_TASK_NUM_FEWSHOT``, default 0), so mixing e.g. 0-shot HellaSwag
+    with 5-shot MMLU is exact. ``skip_tasks`` names tasks to skip (e.g. skip the
+    expensive MMLU baseline).
     """
     metrics = {}
+    skip_tasks = set(skip_tasks)
 
     # ── Perplexity (always includes C4) ──────────────────────────────────────
     ppl = evaluate_model_ppl(
@@ -1496,30 +1608,35 @@ def run_benchmark(model, tokenizer, model_name, kd_args: "KDTrainingConfig", dev
         metrics[f"ppl/{name}"] = value
     print("[bench] PPL: " + ", ".join(f"{k}={v:.4f}" for k, v in ppl.items()))
 
-    # ── lm-eval-harness tasks (hellaswag, mmlu, ...) ─────────────────────────
+    # ── lm-eval-harness tasks — one call per task, per-task few-shot ─────────
     tasks = [t.strip() for t in kd_args.lm_eval_tasks.split(",") if t.strip()]
+    tasks = [t for t in tasks if t not in skip_tasks]
+    if skip_tasks:
+        print(f"[bench] skipping lm-eval tasks: {sorted(skip_tasks)}")
     if tasks:
         from eval.lm_harness.eval import eval_tasks
 
-        num_fewshot = 5 if any(t == "mmlu" for t in tasks) else 0
         was_training = model.training
         model.eval()
         try:
-            raw = eval_tasks(
-                model,
-                model_name,
-                tokenizer,
-                tasks,
-                limit=kd_args.lm_eval_limit,
-                max_seqlen=kd_args.lm_eval_max_seqlen,
-                batch_size=kd_args.lm_eval_batch_size,
-                num_fewshot=num_fewshot,
-            )
+            for task in tasks:
+                num_fewshot = _TASK_NUM_FEWSHOT.get(task, 0)
+                print(f"[bench] lm-eval task={task} (num_fewshot={num_fewshot}) ...")
+                raw = eval_tasks(
+                    model,
+                    model_name,
+                    tokenizer,
+                    [task],
+                    limit=kd_args.lm_eval_limit,
+                    max_seqlen=kd_args.lm_eval_max_seqlen,
+                    batch_size=kd_args.lm_eval_batch_size,
+                    num_fewshot=num_fewshot,
+                )
+                for t, value in _flatten_lm_eval_metrics(raw).items():
+                    metrics[f"lm_eval/{t}"] = value
         finally:
             if was_training:
                 model.train()
-        for task, value in _flatten_lm_eval_metrics(raw).items():
-            metrics[f"lm_eval/{task}"] = value
         print(
             "[bench] lm-eval: "
             + ", ".join(f"{k}={v:.4f}" for k, v in metrics.items() if k.startswith("lm_eval/"))
@@ -1612,11 +1729,12 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     # step -1 = uncompressed baseline, 0 = right after compression, N>0 = after N steps.
     eval_history = {}
 
-    def _benchmark_at(step, tag):
+    def _benchmark_at(step, tag, skip_tasks=()):
         """Run the benchmark, record it in eval_history, and log to W&B."""
         print(f"[bench] === {tag} (step {step}) ===")
         metrics = run_benchmark(
-            model, tokenizer, script_args.model_name_or_path, kd_args, device
+            model, tokenizer, script_args.model_name_or_path, kd_args, device,
+            skip_tasks=skip_tasks,
         )
         eval_history[step] = metrics
         if use_wandb:
@@ -1640,11 +1758,31 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
 
     # ── Load model + tokenizer ────────────────────────────────────────────────
     print(f"Loading model: {script_args.model_name_or_path}")
-    model = AutoModelForCausalLM.from_pretrained(
-        script_args.model_name_or_path, torch_dtype=torch.bfloat16
-    )
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    # Env-gated multi-GPU sharding for models too large for one GPU (e.g. the
+    # 61GB Qwen3-30B-A3B on 40GB A100s): FORCE_DEVICE_MAP_AUTO=1 shards across
+    # all visible GPUs with accelerate; PER_GPU_MEM caps each shard's budget.
+    # ATTN_IMPLEMENTATION lets configs pick sdpa when flash-attn isn't built.
+    force_shard = os.environ.get("FORCE_DEVICE_MAP_AUTO", "0") == "1"
+    attn_impl = os.environ.get("ATTN_IMPLEMENTATION") or None
+    load_kwargs = dict(torch_dtype=torch.bfloat16)
+    if attn_impl:
+        load_kwargs["attn_implementation"] = attn_impl
+    if force_shard and torch.cuda.device_count() > 1:
+        per_gpu_mem = os.environ.get("PER_GPU_MEM", "36GiB")
+        n_gpus = torch.cuda.device_count()
+        load_kwargs["device_map"] = "auto"
+        load_kwargs["max_memory"] = {i: per_gpu_mem for i in range(n_gpus)}
+        load_kwargs["max_memory"]["cpu"] = os.environ.get("CPU_MEM", "120GiB")
+        print(f"[load] sharding across {n_gpus} GPUs (PER_GPU_MEM={per_gpu_mem}, attn={attn_impl})")
+        model = AutoModelForCausalLM.from_pretrained(
+            script_args.model_name_or_path, **load_kwargs
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            script_args.model_name_or_path, **load_kwargs
+        )
+        model = model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
     if tokenizer.pad_token_id is None:
@@ -1653,11 +1791,28 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     # ── Baseline benchmark (uncompressed model) ───────────────────────────────
     baseline_metrics = None
     if kd_args.run_lm_eval and kd_args.eval_before_compression:
-        baseline_metrics = _benchmark_at(-1, "base (uncompressed) model")
+        _baseline_skip = {t.strip() for t in kd_args.baseline_skip_tasks.split(",") if t.strip()}
+        baseline_metrics = _benchmark_at(-1, "base (uncompressed) model", skip_tasks=_baseline_skip)
 
     # ── Decompose ─────────────────────────────────────────────────────────────
     model = decompose_model(model, tokenizer, decomp_args, train_completions=train_completions)
     compression_ppl_results = None
+
+    # ── Auto-save native MoBE/RFID artifacts (compact factors + HF fallback) ──
+    if decomp_args.train_mode in _MOE_ONLY_TRAIN_MODES and decomp_args.moe_save_native:
+        from compress.moe_basis import save_compressed_model
+
+        compressed_dir = os.path.join(run_dir, "compressed_model")
+        print(f"[decompose] Saving native {decomp_args.train_mode} artifacts to {compressed_dir} ...")
+        saved = save_compressed_model(
+            model, tokenizer, compressed_dir,
+            method=decomp_args.train_mode,
+            activation="silu",
+            base_model_name_or_path=script_args.model_name_or_path,
+            save_native=True,
+            save_hf=decomp_args.moe_save_hf_reconstructed,
+        )
+        print(f"[decompose] Saved compressed artifacts: {saved}")
 
     # ── Benchmark right after compression (step 0, before training) ───────────
     if kd_args.run_lm_eval and kd_args.eval_after_compression:
@@ -1691,6 +1846,37 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
                 indent=2,
             )
         print(f"[PPL] Saved post-decomposition PPL results to {ppl_path}")
+
+    # ── One-shot mode: no recovery training. Emit results and exit. ───────────
+    if kd_args.one_shot_eval_only:
+        print("[one-shot] one_shot_eval_only=True — skipping recovery training.")
+        post_compression_metrics = eval_history.get(0)
+        os.makedirs(run_dir, exist_ok=True)
+        bench_path = os.path.join(run_dir, "benchmark_comparison.json")
+        with open(bench_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "model": script_args.model_name_or_path,
+                    "train_mode": decomp_args.train_mode,
+                    "compression_ratio": decomp_args.compression_ratio,
+                    "moe_basis_count": decomp_args.moe_basis_count,
+                    "moe_basis_rank": decomp_args.moe_basis_rank,
+                    "rfid_xi": decomp_args.rfid_xi,
+                    "tasks": kd_args.lm_eval_tasks,
+                    "before_compression": baseline_metrics,
+                    "after_compression": post_compression_metrics,
+                    "compression_ppl": compression_ppl_results,
+                    "history": {str(step): m for step, m in sorted(eval_history.items())},
+                },
+                f,
+                indent=2,
+            )
+        print(f"[one-shot] Saved benchmark comparison to {bench_path}")
+        _print_benchmark_comparison(baseline_metrics, post_compression_metrics or {})
+        if use_wandb:
+            wandb.finish()
+        print(f"[one-shot] Done. Outputs in {run_dir}")
+        return
 
     # ── Optional online teacher ───────────────────────────────────────────────
     teacher_model = None

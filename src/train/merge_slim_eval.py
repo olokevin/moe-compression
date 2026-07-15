@@ -69,6 +69,25 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 2] Skip LoRA merge (no resume_path)")
         total_params_after_merge = total_params_initial
     
+    # Nyström reconstruction knobs (also drive the leverage metric used for ranking).
+    nystrom_reconstruct = args.prune_kwargs.get("nystrom_reconstruct", False)
+    lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
+    intra_expert_metric = args.prune_kwargs.get("mask_method_kwargs", {}).get("intra_expert_metric")
+    expert_covariances = None
+
+    # Step 2.5 — on-the-fly leverage + covariance collection. The base scoring
+    # stage may predate the Nyström feature, so scores_dir can lack the
+    # 'leverage' metric (needed for ranking) and expert_covariances.pth (needed
+    # for reconstruction). Collect them here on the full un-slimmed model before
+    # mask generation, caching to scores_dir for reuse across runs.
+    if prune_ratio > 0 and (nystrom_reconstruct or intra_expert_metric == "leverage"):
+        from src.calibration.channel_scoring.collect_covariance import (
+            ensure_leverage_and_covariances,
+        )
+        expert_covariances = ensure_leverage_and_covariances(
+            model, tokenizer, args, lambda_ridge=lambda_ridge, verbose=True
+        )
+
     if prune_ratio > 0:
         mask_result = generate_masks(
             scores_dir=args.scores_dir,
@@ -82,12 +101,9 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 3] Skip mask generation (prune_ratio=0)")
     
     if prune_ratio > 0:
-        # Check if Nyström reconstruction is enabled
-        nystrom_reconstruct = args.prune_kwargs.get("nystrom_reconstruct", False)
-        expert_covariances = None
-        lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
-
-        if nystrom_reconstruct:
+        # Fallback: if covariances weren't collected on-the-fly above, try loading
+        # a previously-saved expert_covariances.pth from scores_dir.
+        if nystrom_reconstruct and expert_covariances is None:
             import os as _os
             cov_path = _os.path.join(args.scores_dir, "expert_covariances.pth")
             if _os.path.exists(cov_path):
