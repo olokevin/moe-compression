@@ -1,0 +1,64 @@
+# Nyström-MoE sweep helper — compress only the first 3 MoE layers of Qwen3-30B-A3B
+# and report post-compression PPL, to tune nystrom_fit_lr / nystrom_fit_iters
+# cheaply before the full-model run. No lm-eval (fast signal only).
+#
+# Override lr/iters on the CLI, e.g.:
+#   python src/compress_then_train.py --config <this> \
+#     --nystrom_fit_lr 0.02 --nystrom_fit_iters 1500
+#
+# Launch on A100 (4 GPUs) with the same sharding env flags as the full run.
+
+model_name_or_path: Qwen/Qwen3-30B-A3B-Thinking-2507
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+train_mode: nystrom_moe
+compression_ratio: 0.67
+nystrom_keep_ratio: 0.67
+nystrom_align_to: 128
+nystrom_lambda_ridge: 1.0
+nystrom_fit: true
+nystrom_fit_mode: layer
+nystrom_fit_iters: 2000
+nystrom_fit_lr: 0.001
+nystrom_fit_patience: 0
+nystrom_layer_fit_tokens: 65536
+nystrom_max_fit_tokens: 8192
+nystrom_max_layers: 3            # sweep: compress only the first 3 MoE blocks
+moe_fit_log_every: 100
+moe_save_native: false          # partial compress -> not a saveable checkpoint
+
+calib_source: c4
+calib_num_seqs: 128
+calib_max_length: 1024
+calib_batch_size: 4
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# No lm-eval during the sweep — PPL is the fast signal.
+run_lm_eval: false
+eval_before_compression: false
+eval_after_compression: false
+eval_every_steps: 0
+lm_eval_tasks: hellaswag
+lm_eval_limit: 0.02
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048

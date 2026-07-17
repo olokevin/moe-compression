@@ -83,10 +83,12 @@ _VALID_TRAIN_MODES = {
     "btt_twosteps",
     "mobe",
     "rfid",
+    "nystrom_moe",
 }
-# MoE-only expert basis decomposition (MoBE / RFID-MoE). mobe is data-free;
-# rfid needs calibration data only to collect expert routing counts.
-_MOE_ONLY_TRAIN_MODES = {"mobe", "rfid"}
+# MoE-only expert decomposition (MoBE / RFID-MoE / Nyström-MoE). mobe is
+# data-free; rfid + nystrom_moe need calibration data (routing counts / per-expert
+# activations respectively).
+_MOE_ONLY_TRAIN_MODES = {"mobe", "rfid", "nystrom_moe"}
 _CALIB_FREE_TRAIN_MODES = {"svd", "btt", "mobe"}  # do not need calibration data
 _VALID_CALIB_SOURCES = {"c4", "traces", "training_data"}
 _VALID_KD_LOSS_TYPES = {"sft", "kl", "kl_online", "ce"}
@@ -164,6 +166,7 @@ class KDDecompositionConfig:
                 "btt_twosteps",
                 "mobe",
                 "rfid",
+                "nystrom_moe",
             ],
         },
     )
@@ -321,6 +324,87 @@ class KDDecompositionConfig:
     rfid_residual: bool = field(
         default=False,
         metadata={"help": "RFID residual reconstruction (§3.4). Not implemented; must stay False."},
+    )
+    # ── Nyström-MoE compress-then-fit knobs (train_mode=nystrom_moe) ─────────
+    nystrom_keep_ratio: float = field(
+        default=0.67,
+        metadata={"help": "Fraction of expert intermediate channels kept (0.67 => -33% expert-FFN params)."},
+    )
+    nystrom_align_to: int = field(
+        default=128,
+        metadata={"help": "Round the uniform kept-channel count k to a multiple of this (hardware-friendly)."},
+    )
+    nystrom_lambda_ridge: float = field(
+        default=1.0,
+        metadata={"help": "Ridge for leverage scoring + closed-form down_proj reconstruction (nystrom_moe)."},
+    )
+    nystrom_fit: bool = field(
+        default=True,
+        metadata={"help": "Run the activation-aware Adam refit. False = closed-form only."},
+    )
+    nystrom_fit_mode: str = field(
+        default="layer",
+        metadata={
+            "help": (
+                "Nyström fit granularity. 'layer' (default, fast): fit ALL experts "
+                "of a block jointly against the block-output MSE, replaying the "
+                "frozen gate routing (one Adam run/layer). 'expert' (slow): fit "
+                "each expert separately against its own output MSE."
+            ),
+            "choices": ["layer", "expert"],
+        },
+    )
+    nystrom_layer_fit_tokens: int = field(
+        default=65536,
+        metadata={"help": "Cap on captured block-I/O token rows for the layer-joint fit (fit_mode=layer)."},
+    )
+    nystrom_fit_iters: int = field(
+        default=3000,
+        metadata={"help": "Adam steps per expert for the activation-aware local fit (nystrom_moe)."},
+    )
+    nystrom_fit_lr: float = field(
+        default=0.07,
+        metadata={"help": "Adam learning rate for the per-expert local fit (nystrom_moe)."},
+    )
+    nystrom_fit_patience: int = field(
+        default=0,
+        metadata={"help": "Early-stop patience (steps) on the per-expert fit loss. 0 = fixed iters."},
+    )
+    nystrom_snapshot_every: int = field(
+        default=200,
+        metadata={"help": "Eval/snapshot the fit loss every N Adam steps (also the wandb-curve cadence)."},
+    )
+    nystrom_rel_loss: bool = field(
+        default=False,
+        metadata={"help": (
+            "Use relative-MSE fit loss ‖out−y‖²/‖y‖² (layer mode). NOTE: this "
+            "amplifies the effective lr by ~1/‖y‖² (~1000-3000×), so pair it with a "
+            "correspondingly tiny lr. Default False (raw MSE, lr≈3e-4)."
+        )},
+    )
+    nystrom_max_fit_tokens: int = field(
+        default=8192,
+        metadata={"help": "Per-expert cap on captured routed input rows X used for the local fit."},
+    )
+    nystrom_max_layers: Optional[int] = field(
+        default=None,
+        metadata={"help": "Compress only the first N MoE blocks (sweep aid). None = all layers."},
+    )
+    nystrom_fit_from_layer: int = field(
+        default=0,
+        metadata={"help": (
+            "Layers before this index are compressed closed-form ONLY (no Adam), "
+            "so a deep probe layer can be reached cheaply for lr tuning. 0 = fit all."
+        )},
+    )
+    nystrom_fit_lr_scan: Optional[str] = field(
+        default=None,
+        metadata={"help": (
+            "Comma-separated list of candidate fit LRs to scan at each fitted "
+            "layer (e.g. '3e-4,1e-4,3e-5'). Each is tried from the same init; the "
+            "best (lowest final block-MSE) is kept. Combine with nystrom_fit_from_layer "
+            "+ nystrom_max_layers to probe a single deep layer. None = use nystrom_fit_lr."
+        )},
     )
     moe_save_native: bool = field(
         default=True,
@@ -1151,6 +1235,25 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
             "z_norm": decomp_args.moe_z_norm,
             "log_every": decomp_args.moe_fit_log_every,
             "xi": decomp_args.rfid_xi,
+            # Nyström-MoE knobs (ignored by mobe/rfid).
+            "nystrom_keep_ratio": decomp_args.nystrom_keep_ratio,
+            "nystrom_align_to": decomp_args.nystrom_align_to,
+            "nystrom_lambda_ridge": decomp_args.nystrom_lambda_ridge,
+            "nystrom_fit": decomp_args.nystrom_fit,
+            "nystrom_fit_mode": decomp_args.nystrom_fit_mode,
+            "nystrom_fit_iters": decomp_args.nystrom_fit_iters,
+            "nystrom_fit_lr": decomp_args.nystrom_fit_lr,
+            "nystrom_fit_patience": decomp_args.nystrom_fit_patience,
+            "nystrom_snapshot_every": decomp_args.nystrom_snapshot_every,
+            "nystrom_rel_loss": decomp_args.nystrom_rel_loss,
+            "nystrom_max_fit_tokens": decomp_args.nystrom_max_fit_tokens,
+            "nystrom_layer_fit_tokens": decomp_args.nystrom_layer_fit_tokens,
+            "nystrom_max_layers": decomp_args.nystrom_max_layers,
+            "nystrom_fit_from_layer": decomp_args.nystrom_fit_from_layer,
+            "nystrom_fit_lr_scan": (
+                [float(x) for x in decomp_args.nystrom_fit_lr_scan.split(",") if x.strip()]
+                if decomp_args.nystrom_fit_lr_scan else None
+            ),
         }
     compress_model_with_loader(
         model,
@@ -1798,8 +1901,21 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
     model = decompose_model(model, tokenizer, decomp_args, train_completions=train_completions)
     compression_ppl_results = None
 
-    # ── Auto-save native MoBE/RFID artifacts (compact factors + HF fallback) ──
-    if decomp_args.train_mode in _MOE_ONLY_TRAIN_MODES and decomp_args.moe_save_native:
+    # ── Auto-save compressed MoE artifacts ────────────────────────────────────
+    # nystrom_moe leaves experts as plain (narrower) nn.Linear and updates
+    # config.moe_intermediate_size, so the result is a standard HF checkpoint —
+    # save_pretrained directly. MoBE/RFID use the factorized native+HF saver.
+    if decomp_args.train_mode == "nystrom_moe" and decomp_args.moe_save_native:
+        if decomp_args.nystrom_max_layers is not None:
+            print("[decompose] nystrom_max_layers set (partial compress); skipping checkpoint save.")
+        else:
+            compressed_dir = os.path.join(run_dir, "compressed_model", "hf_reconstructed")
+            os.makedirs(compressed_dir, exist_ok=True)
+            print(f"[decompose] Saving Nyström-MoE HF checkpoint to {compressed_dir} ...")
+            model.save_pretrained(compressed_dir)
+            tokenizer.save_pretrained(compressed_dir)
+            print(f"[decompose] Saved compressed HF checkpoint: {compressed_dir}")
+    elif decomp_args.train_mode in _MOE_ONLY_TRAIN_MODES and decomp_args.moe_save_native:
         from compress.moe_basis import save_compressed_model
 
         compressed_dir = os.path.join(run_dir, "compressed_model")

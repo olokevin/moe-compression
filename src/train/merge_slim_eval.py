@@ -69,6 +69,59 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 2] Skip LoRA merge (no resume_path)")
         total_params_after_merge = total_params_initial
     
+    # Dynamic per-token, per-expert active-parameter allocation (masking
+    # simulation): distribute a fixed channel budget unevenly across each
+    # token's top-K experts. Branches around the static mask-gen / real-slim
+    # path entirely; real_slim stays false. See
+    # docs/results/dynamic_active_param/plan/plan_initial.md.
+    dynamic_alloc_cfg = args.prune_kwargs.get("dynamic_alloc", {}) or {}
+    if prune_ratio > 0 and dynamic_alloc_cfg.get("enabled", False):
+        from src.dynamic_active_param import build_alloc_artifact, install_dynamic_alloc
+
+        criterion = dynamic_alloc_cfg.get("criterion", "router_prob")
+        channel_metric = dynamic_alloc_cfg.get("channel_metric", "activation")
+        k_min = dynamic_alloc_cfg.get("k_min", 16)
+
+        # The leverage metric may be absent from an older scores_dir; collect it
+        # (and covariances, which we don't use here) on-the-fly, same trigger as
+        # the static Nyström path.
+        if channel_metric == "leverage":
+            from src.calibration.channel_scoring.collect_covariance import (
+                ensure_leverage_and_covariances,
+            )
+            lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
+            ensure_leverage_and_covariances(
+                model, tokenizer, args, lambda_ridge=lambda_ridge, verbose=True
+            )
+
+        _print(
+            f"\n[Step 3] Dynamic allocation "
+            f"(criterion={criterion}, channel_metric={channel_metric}, k_min={k_min})"
+        )
+        artifact = build_alloc_artifact(
+            scores_dir=args.scores_dir,
+            channel_metric=channel_metric,
+            device="cpu",
+            verbose=True,
+        )
+        model = install_dynamic_alloc(
+            model,
+            artifact,
+            prune_ratio=prune_ratio,
+            criterion=criterion,
+            k_min=k_min,
+            verbose=True,
+        )
+        _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
+
+        total_params_after_slim = count_params(model)
+        _print(f"[Info] Params unchanged (masking simulation): {total_params_after_slim:,}")
+
+        _print(f"\n[Step 6] Start evaluation...")
+        results = eval_dispatch(args, model, tokenizer, verbose=True)
+        _print(f"[Step 6] ✅ Evaluation results: {results}")
+        return
+
     # Nyström reconstruction knobs (also drive the leverage metric used for ranking).
     nystrom_reconstruct = args.prune_kwargs.get("nystrom_reconstruct", False)
     lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)

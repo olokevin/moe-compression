@@ -1,0 +1,75 @@
+# Nyström-MoE compress-then-fit of Qwen3-30B-A3B at 33% expert-FFN reduction.
+#
+# Per MoE layer, in depth order (re-linearized against the already-compressed
+# prefix): rank each expert's intermediate channels by ridge leverage on its
+# down_proj-input covariance, keep the top k = round(0.67*768) snapped to 128
+# = 512 (=> exactly -33.3% of expert-FFN params; gate/up/down all shrink),
+# closed-form reconstruct down_proj on the kept subset, then Adam-refine the
+# narrowed {gate,up,down} to match the original expert's output on captured
+# routed inputs. Result is a standard HF model with moe_intermediate_size=512.
+#
+# Launch on A100 (4 GPUs) with sharding env flags (see qwen3-30b-on-40gb-a100):
+#   FORCE_DEVICE_MAP_AUTO=1 PER_GPU_MEM=36GiB ATTN_IMPLEMENTATION=sdpa \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+model_name_or_path: Qwen/Qwen3-30B-A3B-Thinking-2507
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── Nyström-MoE decomposition (activation-aware, sequential) ──────────────────
+train_mode: nystrom_moe
+compression_ratio: 0.67          # bookkeeping; size is set by nystrom_keep_ratio
+nystrom_keep_ratio: 0.67         # keep 0.67*p channels -> -33% expert-FFN params
+nystrom_align_to: 128            # k snapped to a multiple of 128 -> k=512
+nystrom_lambda_ridge: 1.0
+nystrom_fit: true                # activation-aware Adam refit
+nystrom_fit_mode: layer          # fit all experts of a block jointly (1 Adam run/layer)
+# Layer-joint fit: gradient of the block-output MSE flows through the frozen
+# gate to each token's top-k experts. Tuned on a DEEP layer (L20) of
+# Thinking-2507 (2026-07-16): lr=1e-3 (tuned on shallow L0) DIVERGES at depth;
+# lr-scan {3e-4,1e-4,3e-5} at L20 -> lr=3e-4 best (block-MSE 3.30e-4->1.25e-4,
+# 2.6x reduction), lr=1e-4 second (2.2x). 800 iters, ~5 min/layer on 4-GPU shard.
+nystrom_fit_iters: 800
+nystrom_fit_lr: 0.0003
+nystrom_fit_patience: 0
+nystrom_layer_fit_tokens: 65536  # captured block-I/O rows for the joint fit
+nystrom_max_fit_tokens: 8192
+moe_fit_log_every: 500
+moe_save_native: true            # save <run_dir>/compressed_model/hf_reconstructed/
+
+calib_source: c4
+calib_num_seqs: 128
+calib_max_length: 1024
+calib_batch_size: 4
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+# ── One-shot: decompose + eval only, NO recovery training ─────────────────────
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── Benchmarking: hellaswag (0-shot) + mmlu (5-shot), PPL on wikitext2/c4 ─────
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: true
+baseline_skip_tasks: mmlu        # skip the expensive uncompressed MMLU baseline (known 82.0)
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1                # full tasks
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048
