@@ -33,6 +33,7 @@ class AllocArtifact:
 
     channel_rank: torch.Tensor  # (L, E, I) long, rank by descending score
     contrib: torch.Tensor       # (L, E) float, expert_out_token_contrib >= 0
+    prefix_sums: torch.Tensor   # (L, E, I) float, cumsum of descending-sorted score
     L: int
     E: int
     I: int
@@ -49,6 +50,22 @@ def _channel_rank_from_scores(scores: torch.Tensor) -> torch.Tensor:
     order = torch.argsort(-scores, dim=-1, stable=True)      # positions -> channel
     rank = torch.argsort(order, dim=-1, stable=True)         # channel -> position
     return rank.to(torch.long)
+
+
+def _prefix_sums_from_scores(scores: torch.Tensor) -> torch.Tensor:
+    """Per (l, e), prefix sums of the *descending-sorted* channel scores.
+
+    ``prefix[..., n-1] = S_e(n) = sum of the top-n scores``. This must use the
+    same descending sort as ``_channel_rank_from_scores`` so that the channel at
+    rank ``r`` contributes exactly the ``r -> r+1`` prefix increment — the
+    coverage curve and the keep-set (top-k by rank) then agree. Used by the
+    ``coverage_alloc`` criterion (paper §4.2: ``rho_e(n) = S_e(n) / S_tot_e``).
+    """
+    # clamp >= 0 so the cumulative curve is non-decreasing (required for the
+    # searchsorted in coverage allocation). Leverage/activation are already
+    # non-negative; this only guards against tiny negative float noise.
+    sorted_desc = torch.sort(scores.clamp_min(0.0), dim=-1, descending=True).values
+    return sorted_desc.cumsum(dim=-1).to(torch.float32)
 
 
 def build_alloc_artifact(
@@ -71,7 +88,9 @@ def build_alloc_artifact(
     Returns:
         AllocArtifact with ``channel_rank`` (L,E,I) and ``contrib`` (L,E).
     """
-    cache_path = os.path.join(scores_dir, f"dynamic_alloc_{channel_metric}.pth")
+    # v2: schema gained ``prefix_sums`` (for coverage_alloc). The bumped filename
+    # ensures pre-v2 caches (which lack it) are not silently reused.
+    cache_path = os.path.join(scores_dir, f"dynamic_alloc_{channel_metric}_v2.pth")
     if os.path.exists(cache_path):
         if verbose:
             _print(f"[DynamicAlloc] Loading cached artifact from {cache_path}")
@@ -79,6 +98,7 @@ def build_alloc_artifact(
         return AllocArtifact(
             channel_rank=payload["channel_rank"].to(device),
             contrib=payload["contrib"].to(device),
+            prefix_sums=payload["prefix_sums"].to(device),
             L=int(payload["L"]),
             E=int(payload["E"]),
             I=int(payload["I"]),
@@ -100,7 +120,8 @@ def build_alloc_artifact(
         raise ValueError(f"Expected (L,E,I) scores for {channel_metric!r}, got {tuple(scores.shape)}")
     L, E, I = scores.shape
 
-    channel_rank = _channel_rank_from_scores(scores)  # (L, E, I) long
+    channel_rank = _channel_rank_from_scores(scores)   # (L, E, I) long
+    prefix_sums = _prefix_sums_from_scores(scores)     # (L, E, I) float
 
     # expert_out_token_contrib is stored as a (calibration-averaged) *negative*
     # per-expert scalar — a more-important expert is more negative. The repo's
@@ -116,13 +137,17 @@ def build_alloc_artifact(
         )
 
     if verbose:
-        _print(f"[DynamicAlloc] channel_rank {tuple(channel_rank.shape)}, contrib {tuple(contrib.shape)}")
+        _print(
+            f"[DynamicAlloc] channel_rank {tuple(channel_rank.shape)}, "
+            f"contrib {tuple(contrib.shape)}, prefix_sums {tuple(prefix_sums.shape)}"
+        )
 
     if save:
         torch.save(
             {
                 "channel_rank": channel_rank.cpu(),
                 "contrib": contrib.cpu(),
+                "prefix_sums": prefix_sums.cpu(),
                 "L": L,
                 "E": E,
                 "I": I,
@@ -136,6 +161,7 @@ def build_alloc_artifact(
     return AllocArtifact(
         channel_rank=channel_rank,
         contrib=contrib,
+        prefix_sums=prefix_sums,
         L=L,
         E=E,
         I=I,

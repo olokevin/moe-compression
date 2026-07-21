@@ -1,0 +1,41 @@
+# Dynamic per-token per-expert active-param allocation (masking simulation) —
+# criterion=coverage_alloc, channel_metric=leverage, 50% budget cut. HellaSwag eval.
+# Coverage-maximized allocation (paper §4.2): coverage target initialized from
+# router probability, single scaling factor alpha binary-searched to the budget.
+# No fine-tuning (resume_path empty), no physical slimming (real_slim false).
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.50
+  dynamic_alloc:
+    enabled: true
+    criterion: "coverage_alloc"
+    channel_metric: "leverage"
+    k_min: 16
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_dynamic_coverage_lev50_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

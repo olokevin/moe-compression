@@ -54,11 +54,12 @@ class TinyMoEBlock(nn.Module):
         return final.reshape(batch_size, sequence_length, hidden_dim), router_logits
 
 
-def _install(block, B, k_min, I, criterion="router_prob"):
+def _install(block, B, k_min, I, criterion="router_prob", prefix_sums=None):
     E = block.num_experts
     # identity ranks: rank[e,c] = c  (channel c has rank c)
     block._dyn_ranks = torch.arange(I).unsqueeze(0).repeat(E, 1).long()
     block._dyn_contrib = torch.rand(E)
+    block._dyn_prefix = prefix_sums
     block._dyn_B = B
     block._dyn_k_min = k_min
     block._dyn_I = I
@@ -112,3 +113,19 @@ def test_nonzero_channels_equal_budget():
         for j in range(K):
             keep = (block_ranks_E_I[int(sel[t, j])] < k[t, j]).sum().item()
             assert keep == int(k[t, j])
+
+
+def test_coverage_rho_one_equals_reference():
+    torch.manual_seed(2)
+    H, I, E, K = 16, 32, 8, 4
+    block = TinyMoEBlock(H, I, E, K)
+    x = torch.randn(2, 5, H)
+
+    ref_out, _ = block.forward(x)
+
+    # rho=1.0 => B=K*I => coverage_alloc keeps all channels => equals reference.
+    prefix = (torch.rand(E, I) + 1e-3).sort(dim=-1, descending=True).values.cumsum(-1)
+    _install(block, B=K * I, k_min=4, I=I, criterion="coverage_alloc", prefix_sums=prefix)
+    dyn_out, _ = block.forward(x)
+
+    assert torch.allclose(ref_out, dyn_out, atol=1e-5), "coverage rho=1.0 must match reference"

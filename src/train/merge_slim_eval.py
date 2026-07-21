@@ -69,6 +69,44 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 2] Skip LoRA merge (no resume_path)")
         total_params_after_merge = total_params_initial
     
+    # Reduce-top-k baseline: route each token to fewer experts (e.g. K/2)
+    # instead of narrowing experts. Halving top_k halves the activated
+    # expert-FFN params per token — the "fewer experts" counterpart to the
+    # dynamic "narrower experts" scheme, at the same active budget. No slimming;
+    # eval the original weights with a smaller routing top_k.
+    reduce_topk = args.prune_kwargs.get("reduce_topk", None)
+    if reduce_topk:
+        from src.base.shared_utils.safe_isinstance import (
+            _get_moe_block,
+            _get_experts,
+            _get_num_hidden_layers,
+            _get_topk,
+        )
+
+        orig_topk = _get_topk(model)
+        new_topk = int(reduce_topk)
+        _print(
+            f"\n[Step 3] Reduce-top-k baseline: routing top_k {orig_topk} -> {new_topk} "
+            f"(active expert-FFN params scaled by {new_topk / orig_topk:.3f})"
+        )
+        n_set = 0
+        for layer_idx in range(_get_num_hidden_layers(model)):
+            moe_block = _get_moe_block(model, layer_idx)
+            if _get_experts(moe_block) is None:
+                continue
+            if hasattr(moe_block, "top_k"):
+                moe_block.top_k = new_topk
+                n_set += 1
+        # keep config in sync (aux-loss / any config.num_experts_per_tok reads)
+        if hasattr(model, "config") and hasattr(model.config, "num_experts_per_tok"):
+            model.config.num_experts_per_tok = new_topk
+        _print(f"[Step 4] ✅ Set top_k={new_topk} on {n_set} MoE blocks (no slimming)")
+
+        _print(f"\n[Step 6] Start evaluation...")
+        results = eval_dispatch(args, model, tokenizer, verbose=True)
+        _print(f"[Step 6] ✅ Evaluation results: {results}")
+        return
+
     # Dynamic per-token, per-expert active-parameter allocation (masking
     # simulation): distribute a fixed channel budget unevenly across each
     # token's top-K experts. Branches around the static mask-gen / real-slim
@@ -84,15 +122,28 @@ def main(args, model, tokenizer):
 
         # The leverage metric may be absent from an older scores_dir; collect it
         # (and covariances, which we don't use here) on-the-fly, same trigger as
-        # the static Nyström path.
+        # the static Nyström path. Skipped entirely when the v2 artifact cache
+        # already exists — the masking path only needs the cached leverage
+        # *scores* (baked into the artifact), never the covariances, so a warmed
+        # cache lets this run without expert_covariances.pth present.
         if channel_metric == "leverage":
-            from src.calibration.channel_scoring.collect_covariance import (
-                ensure_leverage_and_covariances,
+            import os as _os
+            _artifact_cache = _os.path.join(
+                args.scores_dir, f"dynamic_alloc_{channel_metric}_v2.pth"
             )
-            lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
-            ensure_leverage_and_covariances(
-                model, tokenizer, args, lambda_ridge=lambda_ridge, verbose=True
-            )
+            if _os.path.exists(_artifact_cache):
+                _print(
+                    f"[Step 2.5] Using cached dynamic-alloc artifact "
+                    f"({_artifact_cache}); skipping leverage/covariance collection"
+                )
+            else:
+                from src.calibration.channel_scoring.collect_covariance import (
+                    ensure_leverage_and_covariances,
+                )
+                lambda_ridge = args.prune_kwargs.get("lambda_ridge", 1.0)
+                ensure_leverage_and_covariances(
+                    model, tokenizer, args, lambda_ridge=lambda_ridge, verbose=True
+                )
 
         _print(
             f"\n[Step 3] Dynamic allocation "

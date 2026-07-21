@@ -79,6 +79,11 @@ def install_dynamic_alloc(
         block_device = next(moe_block.parameters()).device
         moe_block._dyn_ranks = artifact.channel_rank[mask_idx].to(block_device)   # (E, I) long
         moe_block._dyn_contrib = artifact.contrib[mask_idx].to(block_device)      # (E,) float
+        # prefix sums only needed by coverage_alloc; keep it off other blocks.
+        if criterion == "coverage_alloc":
+            moe_block._dyn_prefix = artifact.prefix_sums[mask_idx].to(block_device)  # (E, I) float
+        else:
+            moe_block._dyn_prefix = None
         moe_block._dyn_B = B
         moe_block._dyn_k_min = int(k_min)
         moe_block._dyn_I = int(I)

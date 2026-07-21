@@ -1,0 +1,37 @@
+# Reduce-top-k baseline (masking-free): route each token to top-4 experts
+# instead of top-8, halving activated expert-FFN params (~50% fewer active
+# params) — the "fewer experts" counterpart to the dynamic "narrower experts"
+# scheme, at the same active budget. Original weights, no slimming, no FT.
+# HellaSwag 0-shot.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.0
+  reduce_topk: 4
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_reduce_topk4_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

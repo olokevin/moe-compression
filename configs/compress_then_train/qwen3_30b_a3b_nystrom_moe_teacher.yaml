@@ -31,10 +31,10 @@ compression_ratio: 0.67          # bookkeeping; size is set by nystrom_keep_rati
 nystrom_keep_ratio: 0.67         # keep 0.67*p channels -> -33% expert-FFN params
 nystrom_align_to: 128            # k snapped to a multiple of 128 -> k=512
 nystrom_lambda_ridge: 1.0
-# ── FIX 1: activation-aware layer-joint fit, self-target, CONVERGED iters ─────
+# ── FIX 1+2: activation-aware layer-joint fit, TEACHER-trajectory target ──────
 nystrom_fit: true                # activation-aware Adam refit
 nystrom_fit_mode: layer          # fit all experts of a block jointly (1 Adam run/layer)
-nystrom_fit_target: self         # fix 1: match this block's own output on compressed input
+nystrom_fit_target: teacher    # fix 2: match ORIGINAL model clean block output h*_l (absorbs upstream drift)
 # lr=3e-4 tuned on deep L20 (lr=1e-3 diverges at depth). Convergence study
 # (2026-07-17): 800 iters was FAR too few — L20 block-MSE keeps dropping
 # 1.05e-4@800 -> 6.0e-5@3000 (rel 0.21->0.156), ~flat by ~1500. Use 1500 (≈2×

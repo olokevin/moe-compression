@@ -377,10 +377,21 @@ class KDDecompositionConfig:
     nystrom_rel_loss: bool = field(
         default=False,
         metadata={"help": (
-            "Use relative-MSE fit loss ‖out−y‖²/‖y‖² (layer mode). NOTE: this "
-            "amplifies the effective lr by ~1/‖y‖² (~1000-3000×), so pair it with a "
-            "correspondingly tiny lr. Default False (raw MSE, lr≈3e-4)."
+            "Use relative-MSE fit loss ‖out−y‖²/‖y‖² (layer mode). NOTE: Adam is "
+            "scale-invariant so this is a near no-op within a layer. Default False."
         )},
+    )
+    nystrom_fit_target: str = field(
+        default="self",
+        metadata={
+            "help": (
+                "Layer-mode fit target. 'self' (fix 1): match this block's own "
+                "output on the compressed-prefix input. 'teacher' (fix 2): match "
+                "the ORIGINAL model's clean block output h*_ℓ (cached once) so each "
+                "block absorbs upstream drift (sequential error compensation)."
+            ),
+            "choices": ["self", "teacher"],
+        },
     )
     nystrom_max_fit_tokens: int = field(
         default=8192,
@@ -1246,6 +1257,7 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
             "nystrom_fit_patience": decomp_args.nystrom_fit_patience,
             "nystrom_snapshot_every": decomp_args.nystrom_snapshot_every,
             "nystrom_rel_loss": decomp_args.nystrom_rel_loss,
+            "nystrom_fit_target": decomp_args.nystrom_fit_target,
             "nystrom_max_fit_tokens": decomp_args.nystrom_max_fit_tokens,
             "nystrom_layer_fit_tokens": decomp_args.nystrom_layer_fit_tokens,
             "nystrom_max_layers": decomp_args.nystrom_max_layers,
