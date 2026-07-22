@@ -1,0 +1,382 @@
+<h1>Elastic Training for MoE Compression: Intern Plan</h1>
+
+<h2>1. Introduction</h2>
+
+<h3>Macro MoE Compression: The Mission</h3>
+
+<p>The Macro team's goal is to enable large MoE models to run on Cor3 hardware &mdash; both P1 (cloud) and Tehama (edge) &mdash; through structural parameter reduction (pruning layers, width, MLP dimensions, experts). The target is 2x for Tehama (e.g., Qwen3-30B-A3B), all within 1pp accuracy degradation. Current best manual recipes give ~4pp drop at 1.5x on Qwen3-30B-A3B. Closing this gap requires solving three critical problems.</p>
+
+<h3>Problem 1: Compression Configuration</h3>
+
+<p>Compressing a large MoE model means choosing how much to reduce along each axis:</p>
+<ul>
+<li><strong>MLP intermediate dimension</strong> (per-layer, per-expert)</li>
+<li><strong>Depth</strong> (number of layers)</li>
+<li><strong>Width</strong> (embedding/hidden dimension)</li>
+</ul>
+
+<p>The space is combinatorial: a 48-layer MoE with 64 experts per layer and three granularity levels per axis yields thousands of valid configurations. Today this is navigated by hand &mdash; pick a config, compress, train, evaluate, repeat. Each trial costs days of GPU time. We need automatic, learning-based config discovery.</p>
+
+<h3>Problem 2: Training-Aware Compression (What to Preserve)</h3>
+
+<p>Standard pruning preserves inference-time importance &mdash; it keeps parameters that minimize output error on calibration data. But in the Macro pipeline, the compressed model will keep training. Minimizing forward error does not guarantee the compressed model can <em>learn</em> &mdash; it may discard subspaces that carry little activation but large gradient, leaving the model unable to recover during fine-tuning. We need compression that preserves what matters for continued training: the subspaces that gradients flow through.</p>
+
+<h3>Problem 3: Compression-Aware Training (How to Recover)</h3>
+
+<p>After compression, the model needs recovery training to regain lost accuracy. Full fine-tuning risks corrupting the retained backbone &mdash; the compressed model already holds good representations, and unrestricted updates on limited recovery data invite catastrophic forgetting. We need training strategies that recover performance without destabilizing the compressed backbone.</p>
+
+<h3>Goal</h3>
+
+<p>The intern plan contains two phases:</p>
+
+<p><strong>Phase 1</strong></p>
+<ol>
+<li>An automatic, learning-based engine to discover the best compression config &mdash; replacing manual search with joint optimization (addresses Problem 1).</li>
+<li>Incorporate training-aware compression and compression-aware training as improvements over vanilla elastic methods (addresses Problems 2 and 3).</li>
+</ol>
+
+<p><strong>Phase 2 (target publication)</strong></p>
+
+<p>Standing upon the baseline built in phase 1, target on a broader, more challenging problem setup:</p>
+
+<p><em>Can we train one large model and have it directly contain optimally-performing models at all scales?</em></p>
+
+<hr/>
+
+<h2>2. Preliminaries</h2>
+
+<h3>2.1 Training-Aware Compression</h3>
+
+<p><strong>The limitation of prior compression.</strong> Existing methods (SVD truncation, Nystr&ouml;m neuron selection) minimize forward truncation error &mdash; they find <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\hat{W}</ac:parameter></ac:structured-macro> closest to <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">W</ac:parameter></ac:structured-macro> in the sense of reconstructing the layer's output on calibration data. This is the right objective if the compressed model is used as-is for inference. But in our pipeline the compressed model will keep training. Minimizing forward error does not guarantee the compressed model can <em>learn</em> &mdash; it may discard subspaces that carry little activation but large gradient, leaving the model unable to recover during fine-tuning.</p>
+
+<p><strong>Two-sided whitening for linear layers.</strong> The idea: weight the compression error by both input statistics and output gradient statistics. For a linear layer <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">y = xW</ac:parameter></ac:structured-macro>, the task-loss change from replacing <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">W</ac:parameter></ac:structured-macro> with <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\hat{W}</ac:parameter></ac:structured-macro> is (second-order Taylor):</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[\Delta \mathcal{L} \approx \| C_g^{1/2} (W - \hat{W}) C_x^{1/2} \|_F^2]]></ac:plain-text-body></ac:structured-macro>
+
+<p>where <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_x = \mathbb{E}[xx^\top]</ac:parameter></ac:structured-macro> (input covariance) and <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_g = \mathbb{E}[\delta y\, \delta y^\top]</ac:parameter></ac:structured-macro> (output gradient covariance). This is a K-FAC approximation to the Hessian: <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">H_W \approx C_x \otimes C_g</ac:parameter></ac:structured-macro>.</p>
+
+<p><strong>What it preserves:</strong> minimizing this two-sided objective discards the subspace with lowest <em>loss curvature</em> &mdash; directions the loss landscape is flat along. These are precisely the directions that training does not actively update. The surviving high-curvature directions are those that both carry forward signal (<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_x</ac:parameter></ac:structured-macro>) and receive backward gradient (<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_g</ac:parameter></ac:structured-macro>).</p>
+
+<p><strong>Extension to Nystr&ouml;m MLP compression.</strong> For a gated MLP (<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">z = u \odot \phi(g)</ac:parameter></ac:structured-macro>, <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">y = zW_d</ac:parameter></ac:structured-macro>), the compressed object is not a single weight matrix but the hidden-neuron transport core. The two-sided whitening idea applies to this core:</p>
+
+<ul>
+<li><strong>Forward covariance</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_f = Z^\top Z</ac:parameter></ac:structured-macro> &mdash; which hidden neurons activate (analogous to <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_x</ac:parameter></ac:structured-macro>)</li>
+<li><strong>Backward covariance</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_b = \delta z^\top \delta z</ac:parameter></ac:structured-macro> &mdash; which hidden neurons receive gradient flow into <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">W_u, W_g</ac:parameter></ac:structured-macro> (analogous to <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_g</ac:parameter></ac:structured-macro>), where <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\delta z = \delta y\, W_d^\top</ac:parameter></ac:structured-macro></li>
+</ul>
+
+<p>The joint kernel that captures both:</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[K_{\text{joint}} = \bar{C}_f^{1/2}\, \bar{C}_b\, \bar{C}_f^{1/2} + \lambda I]]></ac:plain-text-body></ac:structured-macro>
+
+<p>(trace-normalized: <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\bar{C}_f = C_f / \text{tr}(C_f)</ac:parameter></ac:structured-macro>, <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\bar{C}_b = C_b / \text{tr}(C_b)</ac:parameter></ac:structured-macro>). This is the PSD analogue of <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_g^{1/2} W C_x^{1/2}</ac:parameter></ac:structured-macro> &mdash; its eigenvalues are the squared singular values of the two-sided-whitened hidden core <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_b^{1/2} C_f^{1/2}</ac:parameter></ac:structured-macro>.</p>
+
+<p><strong>Application to Nystr&ouml;m selection.</strong> Replace the forward-only kernel <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_f</ac:parameter></ac:structured-macro> with <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}}</ac:parameter></ac:structured-macro> everywhere in the standard Nystr&ouml;m pipeline:</p>
+
+<ul>
+<li><strong>Neuron scoring:</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\text{score}_i = \text{diag}\big((K_{\text{joint}}+\lambda I)^{-1} K_{\text{joint}}\big)</ac:parameter></ac:structured-macro> &mdash; keep the top-<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> neurons</li>
+<li><strong>Down-projection reconstruction:</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\hat{W}_D = (S^\top K_{\text{joint}} S)^{+}\, S^\top K_{\text{joint}}\, W_D</ac:parameter></ac:structured-macro></li>
+</ul>
+
+<p>When <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">C_b \propto I</ac:parameter></ac:structured-macro> (isotropic gradients), <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}} \propto C_f</ac:parameter></ac:structured-macro> and this reduces exactly to standard forward-only Nystr&ouml;m. The training-aware kernel only departs from vanilla when gradient structure is non-uniform &mdash; exactly the regime where forward-only selection fails.</p>
+
+<p><strong>Impact:</strong> At aggressive compression (c.f. &gt; 1.3), training-aware selection retains 1&ndash;2pp more accuracy after recovery training vs. forward-only, because the compressed model preserves its ability to learn.</p>
+
+<h3>2.2 Compression-Aware Training</h3>
+
+<p><strong>Developed by Evgeny.</strong> After compression, freeze the compressed backbone and train only lightweight adapters (LoRA) outperforms directly training the backbone.</p>
+<ul>
+<li>The lost (pruned) parameters is a low-rank residual &rarr; LoRA applies inductive bias towards recovering it</li>
+<li>Avoid drifting off the pretrained manifold of the backbone</li>
+<li>LoRA confines update to stable subspace</li>
+</ul>
+
+<hr/>
+
+<h2>3. Stage 1: Elastic Training Engine</h2>
+
+<h3>3.1 The Elastic Model Concept</h3>
+
+<p>The key insight from Nemotron Elastic and Star Elastic: instead of compressing <em>after</em> training, train one model that <em>contains</em> many smaller models as nested subsets.</p>
+
+<p><strong>Why elastic training beats compress-then-train:</strong></p>
+
+<table>
+<thead><tr><th>Compress-then-train</th><th>Elastic training</th></tr></thead>
+<tbody>
+<tr><td>Compress once &rarr; commit to one size</td><td>One model &rarr; extract any size</td></tr>
+<tr><td>Errors accumulate through the pipeline</td><td>Joint optimization avoids error buildup</td></tr>
+<tr><td>Each size trained independently &mdash; no knowledge sharing</td><td>Shared parameters: large model's capacity helps smaller models</td></tr>
+<tr><td><ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">N</ac:parameter></ac:structured-macro> compression runs for <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">N</ac:parameter></ac:structured-macro> sizes</td><td>1 training run for all sizes</td></tr>
+</tbody>
+</table>
+
+<p><strong>The mechanism is simple:</strong> establish an importance ordering over parameters per layer, define "smaller model = keep the top-<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> most important." Train the full model and simultaneously optimize the submodels by sampling random configs at each step.</p>
+
+<p><strong>Why Elastic Training Outperforms Select-then-Train</strong></p>
+
+<p>To find the best performing config, one solution is select-then-train: first propose multiple candidates, then use a short training for all candidates, and continue full training on the best performing candidate. Elastic training has two core advantages:</p>
+
+<ol>
+<li><strong>No wasted compute.</strong> In select-then-train, you train <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">N</ac:parameter></ac:structured-macro> candidate configs independently, pick the winner, and discard the rest &mdash; all compute spent on losers is wasted. Elastic training sidesteps this: because all configs share parameters (smaller &sub; larger), every training token improves <em>all</em> configs simultaneously.</li>
+<li><strong>Configs improve each other.</strong> The router samples a different config each step, but the weight updates accumulate in the shared pool. Tokens spent training config A update the same top-<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> weights that config B will later use. The final selected config benefits from <em>all</em> prior training.</li>
+</ol>
+
+<h3>3.2 How Elastic Training Works (Nemotron Elastic Flow)</h3>
+
+<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">text</ac:parameter><ac:plain-text-body><![CDATA[Pretrained LLM
+    │
+    ▼
+[1] IMPORTANCE ORDERING
+    Per axis (MLP neurons, attention heads, layers, experts):
+    rank units by activation-based importance.
+    This defines the nesting order — any submodel is a prefix.
+    │
+    ▼
+[2] LEARNABLE ROUTER → CONFIG
+    One tiny 2-layer MLP per axis. Input: one-hot budget target.
+    Output: how much to keep per axis (per-layer in heterogeneous mode).
+    Gumbel-Softmax makes the discrete selection differentiable.
+    │
+    ▼
+[3] MASKED SUBMODEL FORWARD
+    Apply binary masks to activations following the importance ordering.
+    Masked-out neurons/layers/experts contribute zero.
+    Skipped layers use residual bypass: y_{l+1} = y_l.
+    │
+    ▼
+[4] JOINT TRAINING
+    For each batch:
+      • Sample budget target → router produces config
+      • Forward full model (teacher) + masked submodel (student)
+      • L = KD(teacher‖student) + α·L_CE(teacher) + ‖Cost(c) − Target‖
+      • Backprop updates model weights + router parameters jointly
+    │
+    ▼
+[5] ZERO-SHOT EXTRACTION
+    Query router with desired budget → get config → slice checkpoint.
+    Standalone smaller model, no fine-tuning needed.]]></ac:plain-text-body></ac:structured-macro>
+
+<p><strong>Key detail: the router.</strong> The config is not hand-specified &mdash; it is <em>learned</em>. Each router is a 2-layer MLP (~2% extra parameters) that takes a budget target and outputs per-layer dimension choices via Gumbel-Softmax. The router is updated end-to-end: it receives gradient from both the distillation loss (what config gives best accuracy?) and the budget loss (does the config hit the target size?). This enables heterogeneous per-layer allocation.</p>
+
+<p><strong>Budget loss:</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\mathcal{L}_{\text{router}} = \| \text{Cost}(c) - \hat{\mathcal{C}} \|</ac:parameter></ac:structured-macro>, where Cost can be parameter count or actual hardware latency.</p>
+
+<h3>3.3 Detailed Version</h3>
+
+<p><strong>Step 1: Importance Ordering (one-time, before training)</strong></p>
+
+<p>For each compressible axis, rank all units by a forward-pass importance metric:</p>
+<ul>
+<li><strong>FFN neurons:</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\text{score}(i) = \sum_{B,L} |X W_1^{(i)}|</ac:parameter></ac:structured-macro> (activation magnitude of the <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">i</ac:parameter></ac:structured-macro>-th intermediate neuron)</li>
+<li><strong>Attention heads:</strong> aggregate head output norms</li>
+<li><strong>Layers:</strong> normalized MSE contribution &mdash; how much each layer's removal increases output error</li>
+<li><strong>Experts (MoE):</strong> router load or activation magnitude per expert</li>
+</ul>
+
+<p>This ranking is fixed and defines the nesting order: neuron #1 is always kept before neuron #2, etc. Any submodel is a <em>prefix</em> of this ordering.</p>
+
+<p><strong>Step 2: Learnable Router (the config generator)</strong></p>
+
+<p>The elastic config is <em>not</em> hand-specified &mdash; it is the output of a small learned router network. There is one router per axis (depth, FFN width, attention heads, embedding width). Each router is a tiny 2-layer MLP:</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[h = \text{LeakyReLU}(W_1 \cdot \mathbf{e}_{\text{budget}} + b_1), \quad z = W_2 \cdot h + b_2]]></ac:plain-text-body></ac:structured-macro>
+
+<p><strong>Input:</strong> a one-hot vector <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\mathbf{e}_{\text{budget}}</ac:parameter></ac:structured-macro> indicating the target budget. <strong>Output:</strong> logits over the set of possible dimension choices for that axis. In heterogeneous mode, the output is per-layer.</p>
+
+<p>The logits are passed through <strong>Gumbel-Softmax</strong> (temperature <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\tau</ac:parameter></ac:structured-macro>) to produce differentiable discrete selections &mdash; enabling gradient flow back to the router during training.</p>
+
+<p><strong>Step 3: Masked Submodel Forward Pass</strong></p>
+
+<p>Given the router's config, the submodel forward pass works by <strong>masking out</strong> the least-important components at each layer. No architecture change &mdash; just binary masks applied to activations:</p>
+
+<p>For FFN at layer <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\ell</ac:parameter></ac:structured-macro> with router selecting <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> neurons:</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[\text{mask}_\ell = [\underbrace{1, 1, \ldots, 1}_{k}, \underbrace{0, 0, \ldots, 0}_{d_{\text{int}} - k}] \quad \text{(ordered by importance ranking)}]]></ac:plain-text-body></ac:structured-macro>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[h_\ell = (W_1 \cdot x) \odot \text{mask}_\ell, \quad y_\ell = W_2 \cdot \sigma(h_\ell)]]></ac:plain-text-body></ac:structured-macro>
+
+<p>For depth, skipped layers use residual bypass:</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[y^{(\ell+1)} = \begin{cases} y^{(\ell)} + \mathcal{L}_\ell(y^{(\ell)}) & \text{if } \gamma_\ell = 1 \text{ (layer active)} \\ y^{(\ell)} & \text{if } \gamma_\ell = 0 \text{ (layer skipped)} \end{cases}]]></ac:plain-text-body></ac:structured-macro>
+
+<p><strong>Step 4: Joint Optimization</strong></p>
+
+<p>Each training step:</p>
+<ol>
+<li>Sample a target budget &mdash; uniform sampling in Stage 1, curriculum-weighted in Stage 2</li>
+<li>Router produces config for that budget</li>
+<li>Forward the full model (teacher) + forward the masked submodel (student) on the same batch</li>
+<li>Compute losses:</li>
+</ol>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[\mathcal{L} = \underbrace{D_{\text{KL}}(p_{\text{teacher}} \| p_{\text{student}})}_{\text{distillation: submodel matches teacher}} + \underbrace{\alpha \cdot \mathcal{L}_{\text{CE}}(\text{teacher})}_{\text{keep teacher sharp}} + \underbrace{\| \text{Cost}(c) - \text{Target} \|}_{\text{router loss: hit the budget}}]]></ac:plain-text-body></ac:structured-macro>
+
+<ol start="5">
+<li>Backprop through everything: model weights get gradient from the distillation loss; router parameters get gradient from both distillation loss (via Gumbel-Softmax) and budget loss</li>
+</ol>
+
+<p><strong>Step 5: Zero-Shot Extraction</strong></p>
+
+<p>After training, extract any target-budget submodel by: query the router with desired budget &rarr; get config &rarr; slice checkpoint &rarr; standalone smaller model, no further fine-tuning needed.</p>
+
+<p><strong>Budget loss</strong> (Star Elastic): <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\mathcal{L}_{\text{router}} = \| \text{Cost}(c) - \hat{\mathcal{C}} \|</ac:parameter></ac:structured-macro>, where Cost can be parameter count or actual latency on target hardware. Star Elastic shows hardware-aware cost gives 5&ndash;10% better configs than parameter-count proxy.</p>
+
+<h3>3.4 Results from the Literature</h3>
+
+<p>Nemotron Elastic results on Qwen2.5-32B (reasoning benchmarks, post-elastic training):</p>
+
+<table>
+<thead><tr><th>Method</th><th>Budget (active params)</th><th>AIME'24</th><th>MATH-500</th><th>LiveCodeBench</th></tr></thead>
+<tbody>
+<tr><td>Full model</td><td>32B</td><td>72.7</td><td>95.4</td><td>52.4</td></tr>
+<tr><td>Uniform pruning + retrain</td><td>16B</td><td>51.3</td><td>88.2</td><td>38.1</td></tr>
+<tr><td>Nemotron Elastic</td><td>16B</td><td>63.3</td><td>92.8</td><td>45.2</td></tr>
+</tbody>
+</table>
+
+<p>Key takeaway: elastic training at 50% compression (c.f.=2.0) loses only 6&ndash;7pp on hard reasoning tasks, vs. 20+pp for naive uniform pruning. At c.f.=1.5, degradation is typically &lt;2pp.</p>
+
+<h3>3.5 Our Improvements Over Vanilla Elastic</h3>
+
+<p><strong>Improvement 1: Training-aware importance ranking.</strong></p>
+
+<p>Nemotron/Star Elastic use activation magnitude or gradient magnitude separately to rank neurons. We replace this with the joint kernel <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}}</ac:parameter></ac:structured-macro> ranking in Nystrom, which captures which neurons are important for <em>both</em> forward and backward. The elastic ordering reflects what matters for continued training &mdash; not just current inference accuracy.</p>
+
+<p><strong>Improvement 2: Compression-aware training (frozen backbone + LoRA).</strong></p>
+
+<p>During elastic training, freeze the compressed backbone and train lightweight LoRA adapters for recovery. This prevents drifting off the pretrained manifold while still recovering lost accuracy.</p>
+
+<h3>3.6 Full Method Flow</h3>
+
+<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">text</ac:parameter><ac:plain-text-body><![CDATA[Pretrained MoE (e.g., Qwen3-30B-A3B)
+    │
+    ▼
+[1] Compute K_joint per layer/expert
+    (calibration pass: collect C_f and C_b)
+    │
+    ▼
+[2] Elastic training loop:
+    For each batch:
+      • Sample target c.f. ~ Uniform[1.0, 2.0]
+      • Per-layer budget allocation (learned allocator)
+      • Extract submodel: mask top-k(layer) neurons per importance ordering
+      • Forward full model (teacher) + masked submodel (student)
+      • L = KD(teacher‖student) + α·L_CE(teacher) + L_budget
+      • Update model weights + allocator parameters
+    │
+    ▼
+[3] Extraction:
+    Given target c.f., read optimal config from allocator,
+    slice checkpoint to keep only top-k neurons/layers/experts.]]></ac:plain-text-body></ac:structured-macro>
+
+<h3>3.7 Timeline</h3>
+
+<table>
+<thead><tr><th>Week</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Finalize plan. Set up codebase, compute allocation, data pipeline.</td></tr>
+<tr><td>2</td><td>Implement elastic config sampling + training loop on small model (OLMoE-7B-1B). Standalone experiments outside Percipio 2.</td></tr>
+<tr><td>3</td><td>Integrate training-aware compression (K_joint). Launch baseline runs (vanilla elastic vs. training-aware).</td></tr>
+<tr><td>4</td><td>Full elastic training on target model. Initial results &rarr; identify gaps and next improvement steps.</td></tr>
+</tbody>
+</table>
+
+<h3>3.8 Deliverables</h3>
+
+<ol>
+<li><strong>Elastic Qwen3-30B-A3B</strong> at c.f.=1.5 and 2.0: benchmark against current manual compression baseline (which shows ~4pp drop at 1.5x).</li>
+<li><strong>Ablation: training-aware vs. forward-only ranking</strong> &mdash; quantify pp improvement from <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}}</ac:parameter></ac:structured-macro> initialization.</li>
+</ol>
+
+<hr/>
+
+<h2>4. Stage 2: All-in-One Pretraining (Paper Target)</h2>
+
+<h3>4.1 The Research Question</h3>
+
+<p><em>Can we pretrain a large model once such that it directly contains optimal smaller models at continuous sizes &mdash; no post-hoc compression, no elastic fine-tuning?</em></p>
+
+<p>Stage 1 still requires: pretrain model &rarr; run elastic fine-tuning. Stage 2 asks: what if we bake the elastic structure into pretraining itself?</p>
+
+<h3>4.2 Comparison of Paradigms</h3>
+
+<table>
+<thead><tr><th></th><th>Standard (Qwen series)</th><th>Elastic (Stage 1)</th><th>All-in-One (Proposed)</th></tr></thead>
+<tbody>
+<tr><td><strong>Training</strong></td><td>Pretrain + post-train per size</td><td>Pretrain largest &rarr; elastic FT</td><td>Single pretrain produces all</td></tr>
+<tr><td><strong>Parameters</strong></td><td>Independent per size</td><td>Nested (small &sub; large)</td><td>Nested (small &sub; large)</td></tr>
+<tr><td><strong>Sizes</strong></td><td>Discrete (8B, 4B, 1B)</td><td>Discrete (user-specified)</td><td>Continuous (any c.f.)</td></tr>
+<tr><td><strong>Cost</strong></td><td><ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">N \times</ac:parameter></ac:structured-macro> full training</td><td><ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">1\times</ac:parameter></ac:structured-macro> pretrain + <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">1\times</ac:parameter></ac:structured-macro> elastic FT</td><td><ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">1\times</ac:parameter></ac:structured-macro> pretrain</td></tr>
+<tr><td><strong>Quality</strong></td><td>Best (fully optimized each)</td><td>Good (shared params help)</td><td>? (the research question)</td></tr>
+</tbody>
+</table>
+
+<h3>4.3 Core Idea</h3>
+
+<p><strong>Parameterization:</strong> Decompose each weight as <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">W = U \Sigma V^\top</ac:parameter></ac:structured-macro> and train <em>all three factors</em> (<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">U, \Sigma, V</ac:parameter></ac:structured-macro>) end-to-end.</p>
+
+<p><strong>Why this produces elastic structure:</strong> <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\Sigma</ac:parameter></ac:structured-macro> sits on the backpropagation path. Since <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\sigma_i</ac:parameter></ac:structured-macro> directly scales the <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">i</ac:parameter></ac:structured-macro>-th component's contribution to both the forward output and the backward gradient, SGD naturally routes more important information into higher-<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\sigma</ac:parameter></ac:structured-macro> components &mdash; the loss is more sensitive to them, so they attract larger updates. The spectral basis acts as an importance-aware preconditioner <em>during training</em>, not just at extraction time.</p>
+
+<p><strong>Elastic extraction:</strong> Truncate at position <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> &rarr; keep the top-<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">k</ac:parameter></ac:structured-macro> singular components &rarr; get a smaller model. Because training dynamics already concentrate important information into the top components, truncation preserves quality.</p>
+
+<p><strong>Elastic regularizer:</strong> Explicitly optimize submodel quality alongside the full model:</p>
+
+<ac:structured-macro ac:name="mathblock"><ac:plain-text-body><![CDATA[\mathcal{L} = \mathcal{L}_{\text{task}} + \alpha \sum_{c \sim \mathcal{C}} \mathcal{L}_{\text{task}}^{(c)}]]></ac:plain-text-body></ac:structured-macro>
+
+<p>This strengthens the natural spectral concentration &mdash; ensures each prefix <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">(\sigma_1, \ldots, \sigma_k)</ac:parameter></ac:structured-macro> is a good model on its own.</p>
+
+<h3>4.4 Training Scope</h3>
+
+<p><strong>Start with post-training (SFT/RL on a pretrained checkpoint).</strong> Pretraining from scratch is expensive and risks conflating the elastic structure question with pre-training recipe issues. Post-training is sufficient to demonstrate the core claim (spectral concentration during training).</p>
+
+<p><strong>Later:</strong> lightweight pretraining (small model, short schedule) to show the idea extends to training from scratch. Full-scale pretraining only if post-training results are strong.</p>
+
+<h3>4.5 Risks and Challenges</h3>
+
+<ol>
+<li><strong>Cross-layer budget allocation.</strong> Within a layer, SVD gives a clear ordering. Across layers: how to decide "keep 90% of layer 5 vs. 70% of layer 20"? Use the same learned router from Stage 1.</li>
+<li><strong>Capacity interference.</strong> Forcing nesting may tax the full model. Acceptable if &lt; 0.5pp degradation.</li>
+<li><strong>Overhead.</strong> Submodel loss evaluation adds compute. Mitigation: sample 1 subconfig per step on a batch subset.</li>
+</ol>
+
+<h3>4.6 Experimental Plan</h3>
+
+<ol>
+<li><strong>Post-training PoC (Weeks 5&ndash;8):</strong> Take pretrained OLMoE-7B-1B, run SFT with spectral parameterization (<ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">U, \Sigma, V</ac:parameter></ac:structured-macro> all trainable) + elastic regularizer. Extract submodels at various c.f. Compare against: (a) standard SFT + post-hoc compression, (b) Stage 1 elastic fine-tuning.</li>
+<li><strong>Ablations (Weeks 7&ndash;9):</strong> With vs. without elastic regularizer; <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">\alpha</ac:parameter></ac:structured-macro> sweep (regularizer strength); Freeze <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">U,V</ac:parameter></ac:structured-macro> (Stage 1 style) vs. train all (Stage 2 style).</li>
+<li><strong>Lightweight pretraining (Weeks 9&ndash;12):</strong> If post-training works, train a small model from scratch to show the idea generalizes beyond post-training.</li>
+</ol>
+
+<hr/>
+
+<h2>5. Connection to Broader Goals</h2>
+
+<h3>Macro Workstream 2 (Compression Composition)</h3>
+
+<p>Stage 1 directly addresses the composition search problem: instead of manually exploring which axes to compress and by how much, elastic training <em>learns</em> the optimal allocation. This replaces the need for evolutionary search or exhaustive grid search over (depth &times; width &times; MLP &times; expert) configurations.</p>
+
+<h3>ACE (Automated Compression Engine)</h3>
+
+<p>The long-term vision is ACE &mdash; a system that takes (source model, target hardware, budget) and returns the optimal compression pathway. Elastic training changes ACE from an NP-hard search into a lookup:</p>
+
+<ul>
+<li><strong>Without elastic:</strong> ACE must evaluate many (architecture, pathway) candidates</li>
+<li><strong>With elastic:</strong> ACE queries the trained elastic model for the best config at the target budget &mdash; already optimized, no search needed</li>
+</ul>
+
+<h3>Training-Aware Kernel as a General Tool</h3>
+
+<p>The <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}}</ac:parameter></ac:structured-macro> kernel developed here improves all Macro compression tools (Nystr&ouml;m, width pruning, expert pruning) across all workstreams &mdash; not just elastic training. Any compression step that selects "which parameters to keep" benefits from training-aware selection.</p>
+
+<hr/>
+
+<h2>6. Summary</h2>
+
+<table>
+<thead><tr><th>Stage</th><th>Goal</th><th>Key Method</th><th>Timeline</th><th>Success Metric</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Automatic compression config learning</td><td>Elastic training + <ac:structured-macro ac:name="mathinline"><ac:parameter ac:name="body">K_{\text{joint}}</ac:parameter></ac:structured-macro> ranking</td><td>Weeks 1&ndash;4</td><td>Qwen3-30B-A3B at c.f.=1.5: &lt;2pp drop (vs. 4pp baseline)</td></tr>
+<tr><td>2</td><td>One pretrain &rarr; all sizes</td><td>Spectral pretraining + elastic regularizer</td><td>Weeks 5&ndash;12</td><td>Nested submodels within 1pp of independently trained</td></tr>
+</tbody>
+</table>
+
+<p><strong>The core bet:</strong> compression config search is a training problem, not a search problem. Let gradient descent find the optimal allocation &mdash; it's better at high-dimensional optimization than we are.</p>

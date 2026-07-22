@@ -1,0 +1,422 @@
+# Per-Token Channel Allocation for MoE Inference
+
+**A design proposal: keep every parameter alive, spend a fixed activation budget where it hurts least.**
+
+Target architecture: Qwen3-30B-A3B — $L=48$ layers, $d=2048$, $E=128$ routed experts, top-$k=8$, `moe_intermediate_size` $m=768$, SwiGLU, `norm_topk_prob=True`, no shared experts.
+
+---
+
+## 1. Motivation
+
+Essentially all MoE compression work — REAP, SlimQwen, DarwinLM, SlimMoE, PreMoE, MoDeGPT — performs **static parameter reduction**. Weight tensors shrink. A checkpoint is emitted. Every token thereafter sees the same, smaller model.
+
+This is the right target when memory is the binding constraint. But it commits to a single global ranking, decided once, on a calibration set. Whatever the router knew about *this particular token* is discarded before inference begins.
+
+The orthogonal axis — largely explored only at expert granularity (LExI, Ada-K, Top-P routing, NAEE, DynaMoE) — is **input-adaptive activation reduction**: hold all parameters resident, and let the routing policy decide *how much* of the model runs per token. Total parameters fixed; active FLOPs, memory-bandwidth traffic, and inter-GPU communication become functions of the input.
+
+This proposal pushes that axis down a level of granularity, from experts to **channels**.
+
+### The proposal in one sentence
+
+For each token, keep all $E=128$ experts alive, and select a per-token subset of **intermediate channels across all experts simultaneously**, allocating a fixed global channel budget to minimize the layer's contribution to the final loss.
+
+Concretely: rather than picking 8 experts and running all 768 of their channels, pick — say — 3072 channels total, distributed non-uniformly across however many experts the token warrants. A token that the router is decisive about might spend its whole budget on two experts. A token the router is uncertain about might spread thinly across twelve.
+
+### Two consequences worth stating up front
+
+**Adaptive top-$k$ falls out as a special case.** If expert $e$ receives budget $B_e = 0$, it is not activated for this token. The number of active experts becomes an *emergent* per-token quantity determined by the same optimization that allocates channels. LExI, Ada-K, Top-P routing, and NAEE are all recovered as the degenerate restriction $B_e \in \{0, m\}$ — activation is all-or-nothing per expert. Allowing $B_e$ to take intermediate values is a strict generalization.
+
+**This is not compression in REAP's sense.** All experts must remain loaded. Checkpoint size is unchanged (in fact slightly larger — see §7). What is reduced is per-token bandwidth, FLOPs, and communication volume. The target deployment is the same one REAP names for itself — *"use cases which feature small batch sizes such as local deployments and academic research"* — but the bottleneck attacked is different. This should be stated in the threat model rather than left for a reviewer to discover (see §9).
+
+---
+
+## 2. Problem Formulation
+
+Let $\rho \in [0,1]$ be the **active-parameter ratio** relative to the uncompressed model. Baseline top-8 routing activates $k \cdot m = 8 \times 768 = 6144$ channel slots per token per layer. We fix a budget
+
+$$B = \lfloor \rho \cdot k \cdot m \rfloor$$
+
+so $\rho = 0.5 \Rightarrow B = 3072$ channels per token per layer.
+
+For a token with hidden state $x \in \mathbb{R}^d$, we seek a selection $S(x) \subseteq \{1,\dots,E\} \times \{1,\dots,m\}$ of (expert, channel) pairs:
+
+$$
+\boxed{\;
+S^\star(x) \;=\; \arg\min_{|S| = B} \;\; \delta\mathcal{L}\big(S \mid x\big)
+\;}
+$$
+
+where $\delta\mathcal{L}(S \mid x)$ is the increase in final-model loss caused by zeroing every channel *not* in $S$, for this token.
+
+Three requirements make this hard, and they are what the rest of the document addresses:
+
+1. **$\delta\mathcal{L}$ must be tractable.** We need a closed form, not a forward-pass evaluation per candidate set.
+2. **The score must be computable from $x$ alone — before loading weights.** This is the binding constraint. It is violated by the obvious approach, catastrophically. (§5)
+3. **The argmin must be solvable in $O(B)$ at inference, and the resulting selection must produce contiguous memory reads.** A correct-but-ragged selection is worthless.
+
+---
+
+## 3. Exact Channel Deletion
+
+Write a single expert's SwiGLU MLP with $W_G, W_U \in \mathbb{R}^{d \times m}$, $W_D \in \mathbb{R}^{m \times d}$:
+
+$$a = xW_G, \qquad u = xW_U, \qquad h_j = \phi(a_j)\,u_j, \qquad y = hW_D = \sum_{j=1}^{m} h_j\,w_j^\top$$
+
+where $\phi = \mathrm{SiLU}$ and $w_j := W_D[j,:]^\top \in \mathbb{R}^d$.
+
+**Deleting channel $j$** means zeroing $W_G[:,j]$, $W_U[:,j]$, and $W_D[j,:]$ jointly.
+
+> **Lemma (exact).** Channel deletion is exactly equivalent to setting the scalar $h_j$ to zero:
+> $$\Delta y \;=\; y_{\setminus j} - y \;=\; -\,h_j(x)\,w_j \tag{1}$$
+
+No higher-order terms. Since $h_j$ depends only on column $j$ of $W_G$ and $W_U$, and $y$ is additive over channels, no other $h_k$ is perturbed.
+
+A corollary that is easy to miss: **the gate and up columns carry no information beyond the scalar $h_j$.** Their entire forward-path effect is mediated through it. Deleting them saves FLOPs and bandwidth; it does not add an independent error term.
+
+### 3.1 Parameter-space Taylor expansion is wrong here
+
+The tempting move is $\Delta\theta_j = -\theta_j$ followed by a first-order expansion. It overcounts. Let $g_y := \partial\mathcal{L}/\partial y$ and $g_{h_j} := \partial\mathcal{L}/\partial h_j = g_y^\top w_j$. Then
+
+$$\nabla_{W_D[j,:]}\mathcal{L} = h_j\,g_y \;\Longrightarrow\; \big\langle \cdot,\,w_j \big\rangle = h_j\,g_{h_j}$$
+$$\nabla_{W_U[:,j]}\mathcal{L} = g_{h_j}\,\phi(a_j)\,x \;\Longrightarrow\; \big\langle \cdot,\,W_U[:,j] \big\rangle = h_j\,g_{h_j}$$
+$$\nabla_{W_G[:,j]}\mathcal{L} = g_{h_j}\,\phi'(a_j)\,u_j\,x \;\Longrightarrow\; \big\langle \cdot,\,W_G[:,j] \big\rangle = g_{h_j}\,a_j\phi'(a_j)u_j$$
+
+Summing:
+
+$$\big\langle \nabla_{\theta_j}\mathcal{L},\,\theta_j \big\rangle \;=\; g_{h_j}\Big( \underbrace{2h_j}_{\text{up} + \text{down}} + \underbrace{a_j\phi'(a_j)u_j}_{\text{gate}} \Big) \tag{2}$$
+
+But (1) says the correct first-order term is $-h_j g_{h_j}$. Equation (2) inflates it by more than $2\times$.
+
+The cause is Euler's homogeneous function theorem: the contribution $c_j = h_j w_j$ is jointly homogeneous of degree $p$ in the deleted parameters, so $\langle \nabla c, \theta\rangle = p \cdot c$. Under ReLU (1-homogeneous, $a\phi'(a) = \phi(a)$), equation (2) collapses exactly to $3 h_j g_{h_j}$, i.e. $p = 3$. SiLU is not homogeneous, leaving the ugly residual $a_j\phi'(a_j)u_j$.
+
+**$\Delta\theta = -\theta$ is not a small perturbation.** Linearizing in parameter space across a coupled multilinear structure necessarily overcounts. This is why LLM-Pruner-style methods Taylor-expand only *one* matrix of a coupled group, and why structured compression should work in **output space**. We do the latter.
+
+### 3.2 Output-space expansion
+
+$$\Delta\mathcal{L} = g_y^\top \Delta y + \tfrac12 \Delta y^\top H_y \Delta y + O(\|\Delta y\|^3), \qquad H_y := \frac{\partial^2 \mathcal{L}}{\partial y^2}$$
+
+Substituting (1):
+
+$$
+\boxed{\;
+\delta\mathcal{L}_j(x) \;=\; -\,h_j(x)\,\underbrace{g_y^\top w_j}_{=\,g_{h_j}} \;+\; \tfrac12\,h_j(x)^2\; w_j^\top H_y(x)\, w_j
+\;} \tag{3}
+$$
+
+Clean structure: first order in $h_j$, second order in $h_j^2$.
+
+**Killing the first-order term — and why the loss choice matters.** In expectation over a calibration set,
+
+$$\mathbb{E}_x\big[h_j\,g_y^\top w_j\big] = \Big\langle \underbrace{\mathbb{E}_x[h_j\,g_y]}_{=\;\nabla_{W_D[j,:]}\mathcal{L}_{\text{total}}},\; w_j \Big\rangle \;\approx\; 0$$
+
+for a converged model. Note this holds only *in expectation*; per token it is nonzero.
+
+A stronger option is available and should be preferred. Take the loss to be the **self-distillation KL** to the uncompressed model:
+
+$$\mathcal{L}(x) = \mathrm{KL}\big(p_{\theta_0}(\cdot \mid x) \;\big\|\; p_{\theta}(\cdot \mid x)\big)$$
+
+At $\theta = \theta_0$ the gradient vanishes *identically*, not merely in expectation, so the first-order term is exactly zero without appeal to convergence. Its Gauss–Newton Hessian is the Fisher, hence automatically PSD. And it aligns the objective with what one-shot compression actually wants — preserve the original output distribution — rather than "reduce CE on the calibration set."
+
+> ⚠️ Computing the Hessian with **ground-truth labels** yields the *empirical* Fisher, which Kunstner et al. (2019) show is a poor Fisher surrogate — it is contaminated by residuals on tokens the model fits badly. That is not a pedantic distinction here: empirical Fisher up-weights exactly the tokens where the model is wrong, whereas we want the directions the model itself considers load-bearing. Sample labels from the model's own predictive distribution.
+
+Dropping the first-order term:
+
+$$\delta\mathcal{L}_j \;\approx\; \tfrac12\,\mathbb{E}_x\big[h_j^2\; w_j^\top H_y\, w_j\big] \tag{4}$$
+
+### 3.3 The criterion family
+
+Equation (4) is a template; the choice of $H_y$ recovers the literature:
+
+| $H_y$ | Resulting criterion | Corresponds to |
+|---|---|---|
+| $I$ | $\mathbb{E}[h_j^2]\cdot\|w_j\|_2^2$ | Wanda / activation-norm |
+| $\mathbb{E}[g_y g_y^\top]$ | $\mathbb{E}\big[(h_j\,g_{h_j})^2\big]$ | Fisher / OBD |
+| full downstream curvature | global loss-aware | MoDeGPT-style |
+
+Note that the $H_y = I$ row factors into **activation energy $\times$ down-row norm**. Writing $\Delta W_D = -\sum_{j \in S^c} e_j w_j^\top$ and $\Sigma_h := \mathbb{E}[hh^\top]$:
+
+$$\mathbb{E}\,\big\|\Delta y\big\|_{H_y}^2 \;=\; \big\| \Sigma_h^{1/2}\,\Delta W_D\,H_y^{1/2} \big\|_F^2$$
+
+which is precisely the unified bilinear objective $\|S^{1/2}\Delta W H^{1/2}\|_F^2$, instantiated with $S = \Sigma_h$ (input second moment of `down_proj`) and $H = H_y$ (output-side loss curvature). Channel deletion is one particular $\Delta W$ in that family.
+
+### 3.4 The MoE gate, and where $g_e^2$ comes from
+
+In an MoE layer, $y = \sum_e g_e(x)\,h^{(e)}(x)\,W_D^{(e)}$, so (1) becomes $\Delta y = -\,g_e(x)\,h_j^{(e)}(x)\,w_j^{(e)}$ and (4) becomes
+
+$$
+\delta\mathcal{L}_{e,j}(x) \;\propto\; \underbrace{g_e(x)^2}_{\text{router}} \cdot \underbrace{h_j^{(e)}(x)^2\,\big\|w_j^{(e)}\big\|^2_{H_y}}_{s_{e,j}(x)\;:\;\text{intra-expert channel importance}} \tag{5}
+$$
+
+$g_e^2$ is **derived, not a heuristic weighting**: the gate scales $\Delta y$ linearly, and $\Delta y$ appears twice in the quadratic form.
+
+Equation (5) also formalizes the advantage of per-token allocation. Static allocation uses $\mathbb{E}[g_e^2]\cdot\mathbb{E}[s_{e,j}]$, while the correct quantity is
+
+$$\mathbb{E}_x\big[g_e^2\,s_{e,j}\big] = \mathbb{E}[g_e^2]\,\mathbb{E}[s_{e,j}] + \mathrm{Cov}_x\big(g_e^2,\,s_{e,j}\big)$$
+
+The covariance — *"when this expert fires hard, which of its channels are doing the work?"* — is structurally inaccessible to calibration-averaged allocation.
+
+---
+
+## 4. Set Deletion: the Coupling Matrix
+
+Deleting a *set* $T$ of channels gives $\Delta y = -\sum_{j\in T} h_j w_j$, hence
+
+$$\delta\mathcal{L}_T \;\approx\; \tfrac12\,\mathbb{1}_T^\top M\,\mathbb{1}_T, \qquad M_{jk} := \mathbb{E}_x\big[h_j h_k\; w_j^\top H_y w_k\big] \tag{6}$$
+
+**$\delta\mathcal{L}_T \neq \sum_{j\in T}\delta\mathcal{L}_j$.** Cross terms enter from two sources: activation correlation $\mathbb{E}[h_jh_k]$ and non-orthogonality of the down-projection rows $w_j^\top H_y w_k$. Under $H_y = I$ this reads
+
+$$M = \Sigma_h \odot \big(W_D W_D^\top\big)$$
+
+— **activation covariance $\odot$ weight Gram**, a Hadamard product. Any separable global top-$B$ threshold is valid exactly to the extent that $M$ is near-diagonal.
+
+This matters more than it might appear. If one selects channels by the naive marginal score and simply slices them out, the marginal gain of adding channel $k+1$ is $\sigma_{k+1} + 2\sum_{j > k+1} M_{k+1,j}$, and the off-diagonal sum **can be negative**. Marginal gains are then not monotone non-increasing, the greedy solution is not optimal, and the threshold structure of §6 collapses. §7 shows how reconstruction restores it.
+
+---
+
+## 5. The Bandwidth Trap
+
+Here is the constraint that dictates the entire design.
+
+Per channel, the parameters are one gate column, one up column, one down row: $3d = 6144$ parameters. Baseline per-token per-layer read:
+
+$$8 \times 768 \times 6144 = 37.7\text{M params} = 75.5\text{ MB (fp16)}$$
+
+Now suppose we score channels using $h_{e,j}(x)^2$, as equation (5) literally instructs.
+
+**Computing $h$ requires $W_G$ and $W_U$ in full.**
+
+- **All-experts-alive scoring** ($E = 128$): read $128 \times 2 \times 2048 \times 768 = 402.7$M params $= 805$ MB per layer. That is $\mathbf{10.7\times}$ the baseline. The method is dead on arrival.
+
+- **Restricting to the router's top-8 first**: gate + up must be read in full ($8 \times 2 \times 1.57\text{M} = 25.2$M params $= 50.3$ MB, irreducible), and only $W_D$ can be trimmed. Total read $= 50.3 + 25.2\rho_D$ MB. As $\rho_D \to 0$ the ceiling is a **33% saving**, because `down_proj` is only one-third of expert parameters.
+
+> Scoring with $h$ means paying two-thirds of the bill in order to economize on the remaining third.
+
+The target is a read of $6144 \cdot B$ parameters — savings **linear** in $B$. Therefore:
+
+> **The online score must be a function of $x$ alone. $h$ must be eliminated from the scoring path entirely.**
+
+### 5.1 An aside: for *offline* scoring, the factorization is unnecessary
+
+Worth noting, because it prevents wasted engineering. If one only wants the exact per-channel Fisher score offline, substituting $H_y = \mathbb{E}[g_yg_y^\top]$ into the quadratic form collapses everything:
+
+$$\tfrac12\,\mathbb{E}_x\big[\Delta y^\top H_y \Delta y\big] \;\longrightarrow\; \tfrac12\,\mathbb{E}_x\Big[\big(g_y^\top \Delta y\big)^2\Big] \;=\; \tfrac12\,\mathbb{E}_x\Big[\Big(h_j^{(e)}\cdot \tfrac{\partial\mathcal{L}}{\partial h_j^{(e)}}\Big)^2\Big]$$
+
+since $\partial\mathcal{L}/\partial h_j^{(e)} = g_e(x)\cdot g_y^\top w_j$ — backpropagation absorbs both $g_e$ and $w_j$ automatically. So $\kappa$, $H_y$, and $g_e^2$ all vanish, leaving **intermediate activation $\odot$ its own gradient, squared, averaged**:
+
+```python
+# forward hook on the expert's SwiGLU intermediate h, shape [T, 768]
+h_cache[e] = h.detach()
+# backward hook on the same tensor
+score[e] += (h_cache[e] * grad_h).pow(2).sum(dim=0)   # [768]
+```
+
+One forward, one backward, storage $[48, 128, 768] \approx 4.7$M scalars. This is the cheapest and most accurate *offline* oracle, and we will use it as such in §10.
+
+But it is unusable at inference. The factorization $g_e^2 \cdot s_{e,j}$ exists **solely** to separate what can be precomputed from what must be online.
+
+---
+
+## 6. The Method
+
+### 6.1 Offline: a non-increasing marginal-gain curve per expert
+
+For each layer and each expert $e$, form the coupling matrix restricted to tokens that route to $e$:
+
+$$M^{(e)}_{jk} \;=\; \mathbb{E}_{x\,:\,e \in \mathcal{T}(x)}\big[h_j^{(e)} h_k^{(e)}\big] \cdot w_j^{(e)\top}\,\bar H_y\; w_k^{(e)}$$
+
+$M^{(e)} \in \mathbb{R}^{768\times768}$ is PSD. Run **pivoted Cholesky**, yielding a pivot order $\pi_e$ and pivot values $\sigma_{e,1} \ge \sigma_{e,2} \ge \cdots \ge \sigma_{e,m} \ge 0$. (Non-increasing residual diagonals are guaranteed for PSD matrices.)
+
+The key identity: after retaining the first $k$ pivot channels and performing Nyström reconstruction, the residual error is the trace of the Schur complement,
+
+$$\mathcal{E}_e(k) \;=\; \sum_{i > k} \sigma_{e,i}$$
+
+so the marginal gain of the $(k{+}1)$-th channel is exactly $\sigma_{e,k+1}$, and
+
+$$\mathcal{E}_e(k) - \mathcal{E}_e(k+1) = \sigma_{e,k+1} \quad \text{is non-increasing in } k.$$
+
+**$\mathcal{E}_e$ is discretely convex.** This is what makes everything downstream work.
+
+### 6.2 Online: separable convex allocation → global threshold
+
+The per-token problem is
+
+$$\min_{\{B_e\}} \;\sum_{e=1}^{E} g_e(x)^2\,\mathcal{E}_e(B_e) \qquad \text{s.t.} \quad \sum_e B_e = B, \quad B_e \ge 0$$
+
+A separable resource-allocation problem with convex (non-increasing marginal gain) objectives. Greedy is optimal, and equivalently, thresholding is optimal. Define the **online score**
+
+$$
+\boxed{\;\omega_{e,k}(x) \;=\; g_e(x)^2 \cdot \sigma_{e,k}\;}
+$$
+
+and take the global top-$B$ over all $(e,k)$ pairs.
+
+Because $\sigma_{e,\cdot}$ is already sorted per expert, the retained set $\{k : \omega_{e,k} \ge \lambda\}$ is **automatically a prefix** $\{1,\dots,B_e\}$. The water level $\lambda$ is shared; $g_e(x)^2$ vertically scales each expert's error curve while its spectral decay determines the slope. Compressibility and routing couple with no manual blending.
+
+**Adaptive top-$k$ is emergent.** If $g_e(x)^2\sigma_{e,1} < \lambda$, then $B_e = 0$ and expert $e$ is skipped entirely for this token.
+
+### 6.3 Inference procedure
+
+Per token, per layer:
+
+1. **Router forward.** Compute $g(x) \in \mathbb{R}^{128}$. Cost: $2048 \times 128$ MAC — negligible. *No expert weights touched.*
+2. **Find the water level $\lambda$.** Merge 128 pre-sorted lists to depth $B$ via a heap: $O(B\log E) \approx 2\times10^4$ ops. Alternatively binary-search $\lambda$ and set $B_e = \#\{k : \sigma_{e,k} \ge \lambda / g_e(x)^2\}$ by per-expert binary search.
+3. **Load prefixes.** For each $e$ with $B_e > 0$: $W_G^{(e)}[:, \pi_e(1{:}B_e)]$, $W_U^{(e)}[:, \pi_e(1{:}B_e)]$, and the reconstruction operands of §7. **If weights are physically permuted by $\pi_e$ offline, these are contiguous slices — no gather.**
+4. **Compute** the expert output as in §7, weight by $g_e(x)$, sum.
+
+Read volume $= 6144 \cdot \sum_e B_e = 6144 B$, **strictly linear in $B$**. At $\rho = 0.5$: 37.7 MB vs. 75.5 MB baseline — a true 50% reduction, against the naive method's 25%.
+
+Lookup-table cost: $\sigma \in \mathbb{R}^{128\times768}$ (fp16, 196 KB/layer) plus $\pi$ (uint16, 196 KB/layer). Roughly **1%** of the 37.7 MB read.
+
+---
+
+## 7. Reconstruction Must Act on Activations, Not Weights
+
+There is a trap in §6.1 that must be defused: $\mathcal{E}_e(k) = \sum_{i>k}\sigma_{e,i}$ presupposes reconstruction. Without it, §4's off-diagonal terms destroy monotone marginal gains and the threshold structure fails.
+
+The Nyström-optimal reconstruction on the retained set $S$ is
+
+$$\hat W_{D,S} \;=\; \big(\Sigma_{SS}\big)^{-1}\Sigma_{S,:}\,W_D \;=\; L_S^{-\top}\,C_{1:k,:}, \qquad C := L^\top W_D \;\;(\text{offline}, \;768\times2048)$$
+
+with $L$ the pivoted Cholesky factor. The problem: $L_S^{-\top}$ is an upper-triangular solve that **changes with $k$**. So $\hat W_D^{(k)}$ is *not* a row slice of any fixed matrix — **nesting breaks**. Materializing $\hat W_D$ per token per expert costs $O(k^2 d) \approx 3\times10^8$ MAC. Fatal.
+
+**Fix: apply the reconstruction operator to the activation vector instead of the weight matrix.**
+
+$$
+\boxed{\;
+y_e \;=\; h_S\,\hat W_{D,S} \;=\; \Big(\underbrace{L_S^{-\top}\,h_S^\top}_{k\times k \text{ triangular solve}}\Big)^{\!\top} C_{1:k,:}
+\;}
+$$
+
+- $C_{1:k,:}$ is a **contiguous row prefix** of a precomputed matrix. Nesting restored. No online factorization, no per-budget bucketing, no storage blow-up ($C$ has the same shape as $W_D$).
+- Online overhead: $k^2/2$ MAC. At $k = 384$, that is $7.4\times10^4$ against a main GEMM of $kd = 7.9\times10^5$ — about **+10%**.
+- Extra read: the leading triangular block $L_{1:k,1:k}$, i.e. $k^2/2$ params. Eight experts $\Rightarrow$ 1.2 MB against 37.7 MB — about **+3%**.
+- Extra storage: $L^{(e)}$ per layer is $128 \times 768^2/2 = 37.7$M params, against 604M expert params — **+6%**. This is the price of the method; the checkpoint grows.
+
+Reconstruction is not an accuracy garnish. **It is what makes the water-filling threshold structure legal.**
+
+---
+
+## 8. Computing $\bar H_y$ and the $\kappa$ Table
+
+The static factor $\kappa_{e,j} := w_j^{(e)\top}\bar H_y\,w_j^{(e)}$ feeds $M^{(e)}$'s diagonal.
+
+**Accumulate $\bar H_y$.** Register a backward hook on the MoE layer output (*before* the residual add) to obtain $g_y \in \mathbb{R}^{T\times d}$, then stream
+
+$$\bar H \;\leftarrow\; \bar H + G^\top G, \qquad G \in \mathbb{R}^{T\times 2048}$$
+
+in fp32 (bf16 forward is fine; the accumulator is not). Per layer: $2048^2 \times 4\text{B} = 16.8$ MB. Compute $\kappa$ and discard — $\bar H$ has no further use.
+
+**Damping** (the accumulator's rank is capped by token count and its spectrum decays fast):
+
+$$\bar H \leftarrow \bar H + \lambda_H\,\frac{\mathrm{tr}(\bar H)}{d}\,I, \qquad \lambda_H \sim 10^{-2}$$
+
+**Batched $\kappa$.** Stack the layer's 128 down-projections into $\mathcal{W} \in \mathbb{R}^{98304 \times 2048}$:
+
+```python
+kappa = ((W @ H_bar) * W).sum(-1).view(128, 768)   # ~4e11 FLOP/layer
+```
+
+$\approx 20$ TFLOP over 48 layers; tens of seconds on an H100. Not a bottleneck.
+
+**Low-rank alternative.** With $\bar H = U\Lambda U^\top$ truncated to rank $r$, $\kappa_j = \|\Lambda_r^{1/2}U_r^\top w_j\|^2$; $r \approx 256$ typically captures most spectral mass. Incidentally, **the effective rank of $\bar H$ is itself a quantity worth reporting**: if it is low, $H_y$ is strongly anisotropic and the $H_y = I$ ablation should lose badly.
+
+### Practical hazards
+
+- **Where to hook $y$.** It must be the MoE layer output before the residual addition. Downstream RMSNorm rescaling is absorbed into $g_y$ by backpropagation automatically — do not hand-compensate.
+- **Gradient-scale long tail.** $\|g_y\|$ spans orders of magnitude across positions (sequence-initial and rare tokens dominate). Left alone, $\bar H$ is determined by a handful of tokens — the same failure mode as frequency weighting in REAP-style criteria. Normalize per token ($g_y / \|g_y\|$) or at minimum clip, and report the choice as a hyperparameter.
+- **Which model.** In the one-shot setting, curvature at $\theta_0$: the original model. Iterative variants should recompute $\bar H$ per round, at linear cost.
+
+---
+
+## 9. What Is Lost, and What Is Not
+
+The honest accounting. The exact score is $g_e(x)^2\,h_{e,j}(x)^2\,\kappa_{e,j}$. We use
+
+$$g_e(x)^2 \cdot \underbrace{\bar h^2_{e,j}\,\kappa_{e,j}}_{\text{frozen: } \sigma_{e,k}}, \qquad \bar h^2_{e,j} := \mathbb{E}\big[h^2_{e,j} \,\big|\, e \in \mathcal{T}(x)\big]$$
+
+**The intra-expert channel ordering is frozen to a conditional mean.** That is the sacrifice.
+
+**What survives is the more valuable half.** The token-dependence of $g_e(x)$ is fully preserved, and $g_e$ ranges over $[0,1]$ across experts with enormous dynamic range. Most of the mass of $\mathrm{Cov}_x(g_e^2,\cdot)$ lives there. The structural argument that static calibration cannot access $\mathrm{Cov}_x(g^2,\delta^2)$ **remains intact across experts**; only the within-expert component degenerates.
+
+Two additional approximations, stated plainly: $H_y$ is frozen to $\bar H_y$, discarding $\mathrm{Cov}_x(H_y, \cdot)$; and $M^{(e)}$ is block-diagonal by construction, discarding cross-expert covariance (this is the block-diagonal special case of whole-layer Nyström under cross-expert orthogonality).
+
+### Batching — where the prefix structure pays for itself again
+
+At batch size $N$, an expert must load the **union** of the per-token prefixes. Because prefixes are nested, *the union of prefixes is a prefix*, of length $\max_n B_e^{(n)}$. Batched read $= 6144\sum_e \max_n B_e^{(n)}$, and GEMM shapes stay regular.
+
+A gather-based predictor scheme (§11) has ragged unions — worst case $\sum_n B_e^{(n)}$ — and breaks grouped GEMM. **This is the second and more consequential systems advantage of the prefix formulation.**
+
+But as $N$ grows, $\max_n B_e^{(n)} \to 768$ and the saving vanishes. **The target regime is necessarily small-batch / local decode.** Write this into the threat model rather than waiting for a reviewer to find it.
+
+---
+
+## 10. Validation Plan
+
+Ordered by cost. The first two are the load-bearing ones and should precede any end-to-end experiment.
+
+**E1 — Is the separable top-$B$ threshold legal?** *(forward hooks only, ~1 day)*
+For each (layer, expert), compare the ordering by $\mathrm{diag}(M^{(e)})$ against the full pivoted-Cholesky pivot order $\pi_e$, via Kendall $\tau$. Note the identity: the first Cholesky pivot is exactly $\arg\max_j M_{jj}$, so **global top-$B$ is pivoted Cholesky's first step with residual updates suppressed.** $\tau \approx 1$ layers admit separable allocation; low-$\tau$ layers have strongly coupled channels. This simultaneously answers "is the threshold valid" and "which layers need special handling."
+
+**E2 — How much does freezing the intra-expert order cost?** *(forward hooks, ~1 day)*
+For each (layer, expert), over tokens routed to $e$, compute Kendall $\tau$ between the per-token ordering $\{h_{e,j}(x)^2\kappa_{e,j}\}_j$ and the calibration-mean order $\pi_e$. Report the distribution.
+
+> **Falsifiable hypothesis.** $\tau$ increases monotonically with expert specialization (measured by $\mathbb{E}[g_e \mid e\in\mathcal{T}]$, or by the tightness of the token cluster routed to $e$). Rationale: MoE's premise is specialization — the tokens routed to $e$ form a narrow cluster, so within-cluster variance of $h^2$ is small.
+
+If it holds, the static prefix is near-oracle in deep layers and degrades in early layers where experts are undifferentiated. **This is the same phenomenon LExI and DynaMoE observe as "early layers need more experts," seen from the other side** — a unifying narrative, and a strong one.
+
+**E3 — Oracle gap.** Use the exact §5.1 Fisher score as an oracle ranking. Measure Spearman correlation against $g_e^2\bar h^2\kappa$. This bounds the achievable accuracy of the online scheme.
+
+**E4 — Criterion ablation.** $H_y = I$ (free) vs. $\bar H_y$ (Fisher). If the gap is small, $H_y$'s anisotropy does not matter on this model and §8 is unjustified complexity. **Run this before building §8.**
+
+**E5 — End-to-end.** Accuracy vs. $\rho \in \{0.75, 0.5, 0.25\}$ on Qwen3-30B-A3B, against: (i) static top-8 baseline, (ii) REAP at matched *active*-parameter count, (iii) LExI-style layer-adaptive expert counts, (iv) uniform per-expert channel truncation. Report wall-clock and bytes-read, not just FLOPs.
+
+---
+
+## 11. When a Predictor Is Warranted — and the Bar It Must Clear
+
+If E2 shows some layers with low $\tau$, one could predict $\hat s_{e,j}(x)$ from $x$ directly (Deja Vu-style contextual sparsity: shared $P\in\mathbb{R}^{2048\times r}$ computed once, per-expert $Q^{(e)}\in\mathbb{R}^{r\times768}$).
+
+Do the arithmetic first. At $r = 32$: predictor weights $= 128\times32\times768 = 3.15$M params $= 6.3$ MB/layer, i.e. **+17%** on the 37.7 MB target read — and the selected channels are no longer contiguous, forcing a gather and (per §9) destroying the batched-prefix property.
+
+> **The bar: a predictor at budget $B$ must beat the prefix scheme at budget $1.17B$.**
+
+I have not seen this control in the literature. It is a high bar. Recommendation: run E2 first, enable the predictor **only on low-$\tau$ layers**, as a layer-adaptive hybrid rather than a global mechanism.
+
+A cheap middle path exists: store $K$ pivot orders per expert and index them by the VQ codeword of $x$ (16 centroids; argmax costs $2048\times16$). At $K = 4$, storage grows only on the $\pi,\sigma$ tables (< 1 MB/layer) and contiguity is preserved within each codebook entry.
+
+---
+
+## 12. Positioning
+
+Five axes, and to our knowledge no published method combines them:
+
+| Axis | This work | REAP / PreMoE | LExI / Ada-K | MoDeGPT / MoBE |
+|---|---|---|---|---|
+| All experts alive | ✅ | ❌ (pruned) | ✅ | ✅ |
+| Intra-expert channel selection | ✅ | ❌ | ❌ | ✅ (static) |
+| SVD/Nyström error ranking | ✅ | ❌ (router heuristic) | ❌ | ✅ |
+| Per-token dynamic | ✅ | ❌ | ✅ (expert-level only) | ❌ |
+| Cross-expert router$\times$error budget | ✅ | ❌ | ❌ | ❌ |
+
+Closest prior art: DualSparse-MoE (2508.18376), Bandwidth-Efficient Adaptive MoE (2512.17073), Attribution-Guided Coverage-Maximized Pruning (2606.18304).
+
+Two secondary contributions fall out along the way:
+
+- **A negative result worth publishing.** Parameter-space Taylor expansion for coupled channel groups overcounts by the Euler homogeneity degree ($3\times$ under ReLU, $\approx 2\text{–}3\times$ under SiLU). §3.1 gives the exact correction.
+- **The uncompressed `down_proj` in MoBE is unjustified.** MoBE presents no ablation for the decision, and the MoLAE paper it cites (2503.23100) contradicts it — MoLAE's own ablation identifies `up` as the operator to preserve, and MoLAE compresses all three operators for Qwen-series models. MoBE's Appendix B effective-rank analysis shows `down_proj` ranks comparable to `gate`/`up`. Our formulation treats all three symmetrically (channel deletion is inherently joint), which is the natural way to exploit this gap.
+
+---
+
+## Appendix: Cost Summary (per layer, Qwen3-30B-A3B, fp16, $\rho = 0.5$)
+
+| Quantity | Value | Relative to 37.7 MB target read |
+|---|---|---|
+| Baseline top-8 read | 75.5 MB | 200% |
+| Naive $h$-scoring, all experts alive | 805 MB | 2134% |
+| Naive $h$-scoring, top-8 first (best case) | 50.3 MB | 133% |
+| **This method: expert weight prefixes** | **37.7 MB** | **100%** |
+| $\sigma$ + $\pi$ lookup tables | 0.39 MB | +1% |
+| $L_{1:k,1:k}$ triangular blocks | 1.2 MB | +3% |
+| Triangular-solve FLOPs | $k^2/2$ per expert | +10% compute |
+| Extra checkpoint storage ($L^{(e)}$) | 37.7M params | +6% of expert params |
+| *(rejected)* predictor weights, $r=32$ | 6.3 MB | +17%, breaks contiguity |

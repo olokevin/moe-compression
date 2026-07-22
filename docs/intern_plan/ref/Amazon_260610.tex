@@ -1,0 +1,236 @@
+\documentclass[9pt]{beamer}
+\usefonttheme[onlymath]{serif}
+% Theme settings
+\usetheme{metropolis} % Professional, clean theme
+\usepackage[english]{babel}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{mdframed}
+
+% Custom Commands from your report
+\newcommand{\ten}[1]{\bm{\mathcal{#1}}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+\title{Improved Recipe for Compress-then-Train}
+\author{Yequan Zhao}
+\date{\today}
+
+\begin{document}
+	
+	\maketitle
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Outline}
+		
+		\textbf{Goal:} a better recipe for \emph{compress-then-train}: optimize for the model \emph{after} training, not only at compression time.
+		
+		\begin{itemize}
+			\item \textbf{Reasoning-aware compression}: preserve long-sequence generation (reasoning) capability
+			\item \textbf{Training-aware compression} SVD, BTT and Nystrom for MoE expert compression
+			\item \textbf{Extended training recipe}: use \textbf{on-policy distillation (OPD)} to keep improving on reasoning tasks after standard KD plateaus.
+		\end{itemize}
+		
+	\end{frame}
+	
+	\begin{frame}{Reasoning-aware compression: calibration preserves generation}
+		
+		\textbf{Challenge.} Structured pruning/compression was very weak at \emph{reasoning}
+		
+		\vspace{0.4em}
+		\textbf{Cause.} The calibration covariances were collected \emph{truncated fixed-length windows} --- losing long chain of thoughts transition, the compressed model doesn't know where to stop.
+		
+		\vspace{0.4em}
+		\textbf{Fix.} Calibrate on the \emph{full reasoning trace} (no truncation)
+		and \emph{reweight by sequence} (every conversation counts equally, not
+		every token). 
+		
+		\textbf{Result.} Improvement on both training-free, and  the \textbf{advantage holds through the training.}
+		
+		
+		\vspace{0.2em}
+		\begin{minipage}[c]{0.56\linewidth}
+			{\footnotesize
+				\begin{tabular}{@{}lcc@{}}
+					\toprule
+					calibration scheme & MATH-500 & C4 PPL \\
+					\midrule
+					2048 windows            & 56.0\%          & 103.0 \\
+					full sequence                       & 69.0\%          & 98.7 \\
+					full sequence + reweight   & \textbf{71.0\%} & \textbf{92.4} \\
+					\bottomrule
+			\end{tabular}}
+		\end{minipage}\hfill
+		\begin{minipage}[c]{0.42\linewidth}
+			\centering
+			\includegraphics[width=\linewidth]{figs/train_loss.png}
+		\end{minipage}
+		
+		
+		
+	\end{frame}
+	
+	\begin{frame}{Training-aware compression}
+		
+		Input-output whitened SVD
+		\[
+		\hat{\mat{W}}
+		\;=\;
+		\arg\min_{\hat{\mat{W}}}\;
+		\norm{\,\mat{C}_g^{1/2}\,(\mat{W}-\hat{\mat{W}})\,\mat{C}_x^{1/2}\,}_F^2 ,
+		\]
+		solved by truncated SVD of $\mat{M}=\mat{C}_g^{1/2}\,\mat{W}\,\mat{C}_x^{1/2}$,
+		with $\mat{C}_x=\sum_t\mat{x}_t\mat{x}_t^{\!\top}$ (forward activations) and
+		$\mat{C}_g=\sum_t\mat{g}_t\mat{g}_t^{\!\top}$ (back-propagated loss gradients).
+		
+		\vspace{0.8em}
+		This two-sided whitening is a Hessian estimate for the layer weights:
+		\[
+		\mat{H}_{\mat{W}} \;=\; \mathbb{E}\!\left[\,\mat{x}\mat{x}^{\!\top}
+		\,\otimes\, \mat{g}_y\mat{g}_y^{\!\top}\,\right]
+		\approx \mathbb{E}\!\left[\,\mat{x}\mat{x}^{\!\top}\right]
+		\,\otimes\, \left[\mat{g}_y\mat{g}_y^{\!\top}\,\right].
+		\]
+		
+		\vspace{0.4em}
+		So truncation \textbf{discards the least loss-sensitive subspace}, and those
+		surviving high-curvature directions are exactly the ones training keeps
+		actively updating.
+		
+		\textbf{Nystr\"om}: build a single joint forward+backward PSD kernel
+		$\mat{K}_{\text{joint}}=\mat{C}_f^{1/2}\mat{C}_b\mat{C}_f^{1/2}$ and select the
+		hidden neurons by Nystr\"om approximation: keeping the directions important to
+		\emph{both} the forward pass and the gradient that trains $\mat{W}_u,\mat{W}_g$.
+		
+	\end{frame}
+
+	% ---------------------------------------------------------------------------
+	\begin{frame}{OBD-LLM derivation: closed-form loss-aware decomposition}
+
+		\textbf{Objective.} Second-order Taylor expansion of the task-loss change from decomposing $\mat{W}\!\to\!\hat{\mat{W}}=\mat{B}\mat{A}$:
+		\[
+		\Delta L(\mat{w}) \approx (\mat{w}-\hat{\mat{w}})\,\mat{H}_{\mat{w}}\,(\mat{w}-\hat{\mat{w}})^{\!\top}. 
+		\]
+
+		\textbf{K-FAC factorization.} Approximate $\mat{H}_{\mat{w}}=\mat{C}_x\otimes\mat{C}_g$, with $\mat{C}_x=\mathbb{E}[\mat{X}\mat{X}^{\!\top}]=\mat{L}_x\mat{L}_x^{\!\top}$ and $\mat{C}_g=\mathbb{E}[\mat{G}\mat{G}^{\!\top}]=\mat{L}_g\mat{L}_g^{\!\top}$ (Cholesky).
+
+		\textbf{Rewrite the loss.} With $\Delta\mat{W}=\mat{W}-\hat{\mat{W}}$,
+		\begin{align*}
+		\Delta L(\mat{W})
+		&=\mathrm{vec}(\Delta\mat{W})\,(\mat{C}_x\otimes\mat{C}_g)\,\mathrm{vec}(\Delta\mat{W})^{\!\top}\\
+		&=\mathrm{vec}(\Delta\mat{W})\,\mathrm{vec}(\mat{C}_g\,\Delta\mat{W}\,\mat{C}_x)^{\!\top}\\
+		&=\mathrm{tr}\!\big(\Delta\mat{W}^{\!\top}\mat{C}_g\,\Delta\mat{W}\,\mat{C}_x\big)
+		\;=\;\norm{\,\mat{L}_g^{\!\top}\,\Delta\mat{W}\,\mat{L}_x\,}_F^2.
+		\end{align*}
+
+		\textbf{Solution.} A truncated SVD of the whitened weight $\tilde{\mat{W}}=\mat{L}_g^{\!\top}\mat{W}\mat{L}_x$ minimizes the Frobenius norm, hence \textbf{minimizes the loss change} $\Delta L$ --- a closed-form optimal decomposition.
+
+	\end{frame}
+
+	% ---------------------------------------------------------------------------
+	\begin{frame}{MoE expert compression: doubly-whitened Nystr\"om}
+		
+
+		\vspace{0.5em}
+		{\footnotesize OLMoE-1B-7B-Instruct, compression ratio $0.5 (2\times)$; After-training =
+			short SFT recovery ($\sim$10k OpenThoughts math samples).}
+		
+		\vspace{0.2em}
+		{\footnotesize
+			\begin{tabular}{@{}lccccc@{}}
+				\toprule
+				& & \multicolumn{2}{c}{training-free} & \multicolumn{2}{c}{after training} \\
+				\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+				method & storage/active & MMLU & GSM8K & MMLU & GSM8K \\
+				\midrule
+				original (uncompressed)     & 1.0/1.0 & 0.542 & 0.   & ---   & ---   \\
+				\midrule
+				Nystr\"om train-aware & 0.5/0.5 & \textbf{0.382} & \textbf{0.150} & \textbf{0.379} & \textbf{0.215} \\
+				Nystr\"om        & 0.5/0.5 & 0.341 & 0.135 & 0.360 & 0.185 \\
+				REAP (expert removal)           & 0.5/1.0 & 0.289 & 0.000 & 0.325 & 0.050 \\
+				SlimQwen (expert merge)      & 0.5/1.0 & 0.269 & 0.005 &  &  \\
+				\bottomrule
+		\end{tabular}}
+		
+		\vspace{0.5em}
+		\begin{itemize}
+			\item \textbf{expert compression $>$ expert removal/merge}
+			\item Nystr\"om training-aware has improvement on both training-free and after training.
+		\end{itemize}
+		
+	\end{frame}
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Training recipe: off-policy KD vs.\ on-policy distillation}
+		
+		\begin{itemize}
+			\item \textbf{Off-policy KD} --- let student match the teacher's traces. 
+			\item \textbf{On-policy distillation (OPD)} --- student \emph{generates} the
+			responses, teacher \emph{scores} them token-by-token. The student is
+			corrected exactly where \emph{it} goes wrong.
+		\end{itemize}
+		
+		\vspace{1em}
+		\begin{mdframed}
+			\textbf{Two regimes, in order:}
+			\begin{itemize}
+				\item \textbf{Stage 1 --- off-policy KD is more efficient.} Cheap dense
+				supervision recovers most of the quality fast.
+				\item \textbf{Stage 2 --- when Stage 1 plateaus, OPD keeps improving} on
+				reasoning tasks
+				% fixing the student's own failure modes that the teacher's traces never expose.
+			\end{itemize}
+		\end{mdframed}
+		
+	\end{frame}
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Intern Plans (initial)}
+		\begin{itemize}
+			\item Integrate the training-aware compression and demonstrate in the Percipio training pipeline
+			\item Progressive compression: $C_g$ captures the curvature of uncompressed model, but the curvature changes after compression
+			\item Expert rank/c.f. allocation: Nystrom to minimize the error for the whole MoE module. 
+			\item On-policy distillation when current KD plateous
+		\end{itemize}
+		
+		
+%		To get a series of model (e.g., 8B and 4B)
+%		\begin{itemize}
+%			\item separately train
+%			\item train 8B, compress to 4B, \textbf{still need heavy retrain}
+%		\end{itemize}
+%		
+%		\vspace{0.1em}
+%		Compression-aware training:
+%		\begin{itemize}
+%			\item Train a 8B model that \textbf{contains} a good 4B model
+%			
+%			\item Full-rank training-aware transformation
+%			\begin{itemize}
+%				\item The parameter trainability (curvature) is ranked
+%				%: BlockTT (rank by singular value) / Nystrom (rank by row/col leverage score)
+%				\item Only the information beyond the 4B capacity goes to 8B only parameters.
+%			\end{itemize} 
+%			
+%			\item Training does two things:
+%			\begin{itemize}
+%				\item Improve model performance
+%				\item We have loss for both models --- align 4B model to 8B model progressively
+%			\end{itemize}
+%			
+%			
+%
+%		\end{itemize}
+%
+%		\begin{center}
+%			\includegraphics[width=\linewidth]{figs/fura_compression_aware.pdf}
+%		\end{center}
+
+	\end{frame}
+
+	\bibliographystyle{alpha}
+	\bibliography{main}
+	
+\end{document}
