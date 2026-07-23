@@ -12,6 +12,7 @@ The block reads per-layer state attached at install time:
     self._dyn_ranks    (E, I) long   channel ranks by descending score
     self._dyn_contrib  (E,)   float   expert_out_token_contrib >= 0
     self._dyn_prefix   (E, I) float   descending-score prefix sums (coverage_alloc)
+    self._dyn_gains    (E, I) float   pivoted-Cholesky marginal gains (pivchol_global)
     self._dyn_B        int             total kept channels per token
     self._dyn_k_min    int             per-expert floor
     self._dyn_I        int             per-expert cap (moe_intermediate_size)
@@ -50,6 +51,7 @@ def dynamic_moe_block_forward(self, hidden_states: torch.Tensor):
         I=self._dyn_I,
         criterion=self._dyn_criterion,
         prefix_sums=getattr(self, "_dyn_prefix", None),
+        gains=getattr(self, "_dyn_gains", None),
     )
 
     final_hidden_states = torch.zeros(

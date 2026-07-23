@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 460" width="1080" height="460" font-family="Helvetica, Arial, sans-serif">
+  <rect width="1080" height="460" fill="#FFFFFF"/>
+  <defs>
+    <marker id="arrow-default" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#555555"/>
+    </marker>
+    <marker id="arrow-c0" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-c1" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#10B981"/>
+    </marker>
+    <marker id="arrow-c2" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#7C3AED"/>
+    </marker>
+    <marker id="arrow-c3" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#EA580C"/>
+    </marker>
+    <marker id="arrow-c4" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#C62828"/>
+    </marker>
+    <marker id="arrow-c5" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#0D47A1"/>
+    </marker>
+    <marker id="arrow-c6" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#1B5E20"/>
+    </marker>
+    <marker id="arrow-c7" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#4A148C"/>
+    </marker>
+    <marker id="arrow-c8" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#BF360C"/>
+    </marker>
+    <marker id="arrow-c9" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 4, 0 8" fill="#37474F"/>
+    </marker>
+  </defs>
+  <rect x="12.0" y="73.0" width="176.0" height="222.0" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" rx="8"/>
+  <text x="20.0" y="89.0" font-size="12" fill="#999999" font-weight="bold">n experts — stack gate/up, group ~4–8</text>
+  <rect x="404.0" y="153.0" width="272.0" height="232.0" fill="#FFFBF5" stroke="#FDBA74" stroke-width="1" rx="8"/>
+  <text x="412.0" y="169.0" font-size="12" fill="#999999" font-weight="bold">Large core  {Aₑ}  —  partitioned, one slice per expert  (n · p×r)</text>
+  <path d="M 151.5,135.0 L 246.0,166.2" stroke="#94A3B8" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 160.0,168.6 L 246.0,178.1" stroke="#94A3B8" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 160.0,199.4 L 246.0,189.9" stroke="#94A3B8" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 151.5,233.0 L 246.0,201.8" stroke="#94A3B8" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 354.0,164.2 L 469.1,122.0" stroke="#10B981" stroke-width="2" fill="none" marker-end="url(#arrow-c1)"/>
+  <rect x="367.9" y="125.1" width="87.2" height="16" fill="#FFFFFF" rx="3" opacity="0.85"/>
+  <text x="411.5" y="137.1" font-size="11" fill="#777777" text-anchor="middle">shared basis</text>
+  <path d="M 354.0,187.6 L 432.0,192.8" stroke="#FDBA74" stroke-width="1" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 354.0,197.9 L 466.5,227.0" stroke="#F97316" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <rect x="346.8" y="194.5" width="126.8" height="16" fill="#FFFFFF" rx="3" opacity="0.85"/>
+  <text x="410.2" y="206.5" font-size="11" fill="#777777" text-anchor="middle">one slice / expert</text>
+  <path d="M 354.0,208.3 L 497.8,273.0" stroke="#FDBA74" stroke-width="1" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 349.9,216.0 L 510.4,319.0" stroke="#FDBA74" stroke-width="1" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 648.0,96.0 L 705.0,96.0" stroke="#7C3AED" stroke-width="2" fill="none" marker-end="url(#arrow-c2)"/>
+  <rect x="649.4" y="78.0" width="54.2" height="16" fill="#FFFFFF" rx="3" opacity="0.85"/>
+  <text x="676.5" y="90.0" font-size="11" fill="#777777" text-anchor="middle">mix + f</text>
+  <path d="M 857.4,126.0 L 935.9,175.8" stroke="#0D9488" stroke-width="2" fill="none" marker-end="url(#arrow-default)"/>
+  <path d="M 648.0,237.4 L 926.2,215.1" stroke="#EA580C" stroke-width="2" fill="none" marker-end="url(#arrow-c3)"/>
+  <rect x="769.9" y="208.2" width="34.4" height="16" fill="#FFFFFF" rx="3" opacity="0.85"/>
+  <text x="787.1" y="220.2" font-size="11" fill="#777777" text-anchor="middle">Aₑ ·</text>
+  <rect x="40.0" y="101.0" width="120.0" height="34.0" fill="#EFF6FF" stroke="#93C5FD" stroke-width="2" rx="0"/>
+  <text x="100.0" y="122.5" font-size="13" fill="#1F2937" text-anchor="middle" font-weight="bold">W₁  (p×d)</text>
+  <rect x="40.0" y="145.0" width="120.0" height="34.0" fill="#EFF6FF" stroke="#93C5FD" stroke-width="2" rx="0"/>
+  <text x="100.0" y="166.6" font-size="13" fill="#1F2937" text-anchor="middle" font-weight="bold">W₂  (p×d)</text>
+  <rect x="40.0" y="189.0" width="120.0" height="34.0" fill="#EFF6FF" stroke="#93C5FD" stroke-width="2" rx="0"/>
+  <text x="100.0" y="210.6" font-size="13" fill="#1F2937" text-anchor="middle" font-weight="bold">W₃  (p×d)</text>
+  <rect x="40.0" y="233.0" width="120.0" height="34.0" fill="#EFF6FF" stroke="#93C5FD" stroke-width="2" rx="0"/>
+  <text x="100.0" y="254.6" font-size="13" fill="#1F2937" text-anchor="middle" font-weight="bold">W₄  (p×d)</text>
+  <rect x="246.0" y="152.0" width="108.0" height="64.0" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="2" rx="8"/>
+  <text x="300.0" y="180.9" font-size="14" fill="#1F2937" text-anchor="middle" font-weight="bold">Grouped</text>
+  <text x="300.0" y="196.9" font-size="14" fill="#1F2937" text-anchor="middle" font-weight="bold">SVD</text>
+  <rect x="432.0" y="70.0" width="216.0" height="52.0" fill="#ECFDF5" stroke="#34D399" stroke-width="2" rx="8"/>
+  <text x="540.0" y="93.0" font-size="13" fill="#065F46" text-anchor="middle" font-weight="bold">Small core  B</text>
+  <text x="540.0" y="108.0" font-size="10" fill="#888888" text-anchor="middle">shared basis  m·r·d  (one, all experts)</text>
+  <rect x="432.0" y="181.0" width="216.0" height="38.0" fill="#FFF7ED" stroke="#FB923C" stroke-width="2" rx="0"/>
+  <text x="540.0" y="204.6" font-size="13" fill="#9A3412" text-anchor="middle" font-weight="bold">A₁   (→ expert 1)</text>
+  <rect x="432.0" y="227.0" width="216.0" height="38.0" fill="#FFEDD5" stroke="#EA580C" stroke-width="2" rx="0"/>
+  <text x="540.0" y="250.6" font-size="13" fill="#7C2D12" text-anchor="middle" font-weight="bold">A₂   (→ expert e)</text>
+  <rect x="432.0" y="273.0" width="216.0" height="38.0" fill="#FFF7ED" stroke="#FB923C" stroke-width="2" rx="0"/>
+  <text x="540.0" y="296.6" font-size="13" fill="#9A3412" text-anchor="middle" font-weight="bold">A₃   (→ expert 3)</text>
+  <rect x="432.0" y="319.0" width="216.0" height="38.0" fill="#FFF7ED" stroke="#FB923C" stroke-width="2" rx="0"/>
+  <text x="540.0" y="342.6" font-size="13" fill="#9A3412" text-anchor="middle" font-weight="bold">A₄   (→ expert 4)</text>
+  <rect x="705.0" y="66.0" width="210.0" height="60.0" fill="#F5F3FF" stroke="#A78BFA" stroke-width="2" rx="8"/>
+  <text x="810.0" y="92.9" font-size="14" fill="#5B21B6" text-anchor="middle" font-weight="bold">f( Σₖ αₑ,ₖ · Bₖ )</text>
+  <text x="810.0" y="108.9" font-size="11" fill="#888888" text-anchor="middle">mix bases + SiLU (weight space)</text>
+  <circle cx="990.0" cy="210.0" r="64.0" fill="#F0FDFA" stroke="#2DD4BF" stroke-width="2"/>
+  <text x="990.0" y="206.9" font-size="14" fill="#0F766E" text-anchor="middle" font-weight="bold">Ŵₑ</text>
+  <text x="990.0" y="222.9" font-size="11" fill="#888888" text-anchor="middle">expert e  = Aₑ·f(·)</text>
+  <text x="540.0" y="28.0" font-size="15" fill="#111827" text-anchor="middle">MoBE:  small shared basis  +  large per-expert core,  reconstructed with a weight-space nonlinearity</text>
+  <text x="300.0" y="432.0" font-size="13" fill="#6B7280" text-anchor="middle">①  Initialize  (grouped SVD)</text>
+  <text x="820.0" y="432.0" font-size="13" fill="#6B7280" text-anchor="middle">②  Reconstruct expert e :   Ŵₑ = Aₑ · f( Σₖ αₑ,ₖ Bₖ )</text>
+</svg>

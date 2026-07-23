@@ -38,6 +38,8 @@ class AllocArtifact:
     E: int
     I: int
     channel_metric: str
+    gains: torch.Tensor = None  # (L, E, I) float, pivoted-Cholesky marginal gain
+                                # in pivot-position order (pivchol_global only)
 
 
 def _channel_rank_from_scores(scores: torch.Tensor) -> torch.Tensor:

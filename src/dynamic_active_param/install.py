@@ -84,6 +84,11 @@ def install_dynamic_alloc(
             moe_block._dyn_prefix = artifact.prefix_sums[mask_idx].to(block_device)  # (E, I) float
         else:
             moe_block._dyn_prefix = None
+        # pivoted-Cholesky marginal gains only needed by pivchol_global.
+        if criterion == "pivchol_global":
+            moe_block._dyn_gains = artifact.gains[mask_idx].to(block_device)  # (E, I) float
+        else:
+            moe_block._dyn_gains = None
         moe_block._dyn_B = B
         moe_block._dyn_k_min = int(k_min)
         moe_block._dyn_I = int(I)

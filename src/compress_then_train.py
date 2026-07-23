@@ -317,6 +317,14 @@ class KDDecompositionConfig:
         default=1000,
         metadata={"help": "Log the basis-fit loss every N steps (0 disables per-step logging)."},
     )
+    moe_compress_down: bool = field(
+        default=False,
+        metadata={"help": (
+            "MoBE only: also factorize down_proj with the shared basis on its "
+            "OUTPUT (hidden d) side (fit on down_projᵀ), spreading compression "
+            "evenly across gate/up/down. Default False = classic MoBE (down dense)."
+        )},
+    )
     rfid_xi: float = field(
         default=0.8,
         metadata={"help": "RFID fusion weight xi: C_g = xi*E_g + (1-xi)*F_g (rfid only)."},
@@ -416,6 +424,56 @@ class KDDecompositionConfig:
             "best (lowest final block-MSE) is kept. Combine with nystrom_fit_from_layer "
             "+ nystrom_max_layers to probe a single deep layer. None = use nystrom_fit_lr."
         )},
+    )
+    # ── Mixture-of-Basis BTT knobs (compression_rules method=mix_btt) ─────────
+    # First-pass shortcut: read globally from decomp_args (one cell per run)
+    # rather than threading per-rule flags through _match_rule/_plan_compression_rules.
+    mix_btt_space: str = field(
+        default="activation",
+        metadata={
+            "help": (
+                "mix_btt fit regime. 'weight' (cell 1): MoBE-faithful, f on mixed "
+                "cores, data-free ‖W−Ŵ‖² fit via fit_layer_basis (softmax α). "
+                "'activation' (cells 2/3): f on the data path, E_x‖Wx−mixBTT(x)‖² fit."
+            ),
+            "choices": ["weight", "activation"],
+        },
+    )
+    mix_btt_use_mix: bool = field(
+        default=True,
+        metadata={"help": "Learn the n×n basis-mixing matrix α (False => fixed identity buffer, cell 2)."},
+    )
+    mix_btt_use_nonlin: bool = field(
+        default=True,
+        metadata={"help": "Insert SiLU between the small-core and large-core stages (False => identity)."},
+    )
+    mix_btt_fit_lr: float = field(
+        default=3e-4,
+        metadata={"help": "Adam lr for the activation-space local fit (cells 2/3)."},
+    )
+    mix_btt_fit_iters: int = field(
+        default=1500,
+        metadata={"help": "Adam steps for the activation-space local fit (cells 2/3)."},
+    )
+    mix_btt_fit_patience: int = field(
+        default=0,
+        metadata={"help": "Early-stop patience (steps) on the mix_btt fit loss. 0 = fixed iters."},
+    )
+    mix_btt_snapshot_every: int = field(
+        default=200,
+        metadata={"help": "Eval/snapshot the mix_btt fit loss every N Adam steps."},
+    )
+    mix_btt_cap_tokens: int = field(
+        default=8192,
+        metadata={"help": "Per-module cap on captured input rows X for the activation-space fit."},
+    )
+    mix_btt_ws_fit_lr: float = field(
+        default=0.07,
+        metadata={"help": "Adam lr for the weight-space fit (cell 1); MoBE default 0.07."},
+    )
+    mix_btt_ws_fit_iters: int = field(
+        default=30000,
+        metadata={"help": "Adam steps for the weight-space fit (cell 1); MoBE default 30000."},
     )
     moe_save_native: bool = field(
         default=True,
@@ -1024,10 +1082,12 @@ def apply_compression_rules(model, calib_loader, rules, skip_layers, device,
         _CALIB_FREE_METHODS,
         _BACKWARD_CALIB_METHODS,
         _BOTH_CALIB_METHODS,
+        _MIX_BTT_METHODS,
         _compress_with_covariances,
         _compress_with_covariances_combined,
         SUPPORTED_METHOD_SET,
     )
+    from compress.btt.mix_btt import mix_btt_compress_modules
     from compress.calibration import (
         collect_covariances_from_loader,
         collect_backward_covariances_from_loader,
@@ -1064,6 +1124,10 @@ def apply_compression_rules(model, calib_loader, rules, skip_layers, device,
                 f"compression_rules method {method!r} is not supported. Choose from "
                 f"{sorted(SUPPORTED_METHOD_SET)} or {sorted(_MLP_ONLY_METHODS)} or 'none'."
             )
+        if method in _MIX_BTT_METHODS:
+            # mix_btt captures its own raw activations inside the driver; it does
+            # NOT need any covariance flavour collected here.
+            continue
         if method in _CALIB_FREE_METHODS:
             pass
         elif method in _BACKWARD_CALIB_METHODS:
@@ -1127,6 +1191,25 @@ def apply_compression_rules(model, calib_loader, rules, skip_layers, device,
                     if k in down_proj_names and k in name_set}
             nystrom_combined_compress_model(model, stat, sparsity=1.0 - ratio,
                                             skip_layers=skip_layers, device=device)
+            continue
+
+        if method in _MIX_BTT_METHODS:
+            mix_btt_compress_modules(
+                model, calib_loader, names, ratio,
+                mix_space=decomp_args.mix_btt_space,
+                use_mix=decomp_args.mix_btt_use_mix,
+                use_nonlin=decomp_args.mix_btt_use_nonlin,
+                fit_lr=decomp_args.mix_btt_fit_lr,
+                fit_iters=decomp_args.mix_btt_fit_iters,
+                fit_patience=decomp_args.mix_btt_fit_patience,
+                snapshot_every=decomp_args.mix_btt_snapshot_every,
+                cap_tokens=decomp_args.mix_btt_cap_tokens,
+                ws_fit_lr=decomp_args.mix_btt_ws_fit_lr,
+                ws_fit_iters=decomp_args.mix_btt_ws_fit_iters,
+                decomp_mode=decomp_args.decomp_mode,
+                device=device,
+                log_every=decomp_args.moe_fit_log_every,
+            )
             continue
 
         if method in _CALIB_FREE_METHODS:
@@ -1245,6 +1328,7 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
             "patience": decomp_args.moe_fit_patience,
             "z_norm": decomp_args.moe_z_norm,
             "log_every": decomp_args.moe_fit_log_every,
+            "compress_down": decomp_args.moe_compress_down,
             "xi": decomp_args.rfid_xi,
             # Nyström-MoE knobs (ignored by mobe/rfid).
             "nystrom_keep_ratio": decomp_args.nystrom_keep_ratio,
@@ -1897,7 +1981,16 @@ def main(script_args: KDScriptArguments, decomp_args: KDDecompositionConfig, kd_
         model = AutoModelForCausalLM.from_pretrained(
             script_args.model_name_or_path, **load_kwargs
         )
-        model = model.to(device)
+        # MODEL_ON_CPU=1 keeps the whole model resident on CPU while the
+        # (data-free) MoBE/RFID weight-space fit still runs on a single GPU per
+        # layer — lets a fit-only pass proceed on one small GPU without holding
+        # the full 61GB checkpoint in VRAM. Eval/PPL must be disabled in this
+        # mode (they'd run on CPU); use it for the fit+save phase, then eval the
+        # saved hf_reconstructed checkpoint separately with sharding.
+        if os.environ.get("MODEL_ON_CPU", "0") == "1":
+            print("[load] MODEL_ON_CPU=1 — keeping model on CPU (fit runs on GPU per-layer).")
+        else:
+            model = model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
     if tokenizer.pad_token_id is None:

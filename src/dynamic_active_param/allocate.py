@@ -26,7 +26,7 @@ import torch
 
 __all__ = ["allocate_budgets"]
 
-_VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc")
+_VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "pivchol_global")
 
 
 def allocate_budgets(
@@ -38,6 +38,7 @@ def allocate_budgets(
     I: int,
     criterion: str = "router_prob",
     prefix_sums: torch.Tensor = None,
+    gains: torch.Tensor = None,
 ) -> torch.Tensor:
     """Allocate per-token per-expert channel budgets.
 
@@ -52,10 +53,13 @@ def allocate_budgets(
         k_min: per-expert floor (minimum kept channels per expert).
         I: per-expert cap (moe_intermediate_size).
         criterion: ``router_prob`` | ``contribution`` | ``uniform`` |
-            ``coverage_alloc``.
+            ``coverage_alloc`` | ``pivchol_global``.
         prefix_sums: ``(E, I)`` float, per-expert cumulative sum of the
             descending-sorted channel scores (``prefix[e, n-1] = S_e(n)``).
             Required for ``coverage_alloc``; ignored otherwise.
+        gains: ``(E, I)`` float, pivoted-Cholesky marginal gains in pivot-rank
+            order (``gains[e, r]`` = gain of the channel at pivot rank ``r``).
+            Required for ``pivchol_global``; ignored otherwise.
 
     Returns:
         ``(T, K)`` long tensor ``k`` with ``k_min <= k <= I`` and
@@ -70,6 +74,22 @@ def allocate_budgets(
     B = int(B)
     k_min = int(k_min)
     I = int(I)
+
+    # pivchol_global emerges quotas from a global g^2*sigma threshold — a
+    # dominated expert may get 0 channels, so no k_min floor applies. Branch
+    # before the K*k_min feasibility check.
+    if criterion == "pivchol_global":
+        if gains is None:
+            raise ValueError("criterion='pivchol_global' requires a gains tensor")
+        if B > K * I:
+            raise ValueError(f"Infeasible budget: B ({B}) > K*I ({K * I}).")
+        return _pivchol_allocate(
+            routing_weights=routing_weights,
+            selected_experts=selected_experts,
+            gains=gains,
+            B=B,
+            I=I,
+        )
 
     if K * k_min > B or B > K * I:
         raise ValueError(
@@ -237,5 +257,60 @@ def _coverage_allocate(
             n_best = n_best + add
 
         out[start:stop] = n_best
+
+    return out
+
+
+# Token chunk for the pivchol path — bounds the (chunk, K, I) score tensor.
+_PIVCHOL_CHUNK = 4096
+
+
+def _pivchol_allocate(
+    routing_weights: torch.Tensor,
+    selected_experts: torch.Tensor,
+    gains: torch.Tensor,
+    B: int,
+    I: int,
+) -> torch.Tensor:
+    """Level-1 global g^2-weighted nested selection (plan_level1.md online kernel).
+
+    Per token, pool all ``K*I`` channels of the active experts, score each by
+    ``g_k^2 * sigma_{k,r}`` (``sigma`` = pivoted-Cholesky marginal gain in pivot
+    rank order, monotone non-increasing per expert), and keep the global top-``B``
+    under one shadow price. The per-expert prefix length ``t_k`` (how many of that
+    expert's pivot-ordered channels are kept) emerges from the single global
+    threshold — a dominated expert can receive ``t_k = 0``.
+
+    Because ``sigma`` is monotone per expert and ``g_k^2`` is a per-expert
+    constant, the top-``B`` selection over the pooled scores keeps, for each
+    expert, exactly a *prefix* of its pivot order — so counting how many of an
+    expert's channels made the global top-``B`` gives ``t_k`` directly, and the
+    downstream keep-mask (``pivrank < t_k``) reproduces that prefix.
+
+    Returns ``(T, K)`` long ``t_k`` with ``t_k.sum(dim=1) == B`` per token.
+    """
+    T, K = selected_experts.shape
+    device = selected_experts.device
+    gains = gains.to(device=device, dtype=torch.float32)  # (E, I)
+
+    out = torch.empty((T, K), dtype=torch.long, device=device)
+
+    for start in range(0, T, _PIVCHOL_CHUNK):
+        stop = min(start + _PIVCHOL_CHUNK, T)
+        sel = selected_experts[start:stop]                        # (t, K)
+        g = routing_weights[start:stop].to(torch.float32)         # (t, K)
+        t = sel.shape[0]
+
+        g2 = (g * g).unsqueeze(-1)                                # (t, K, 1)
+        sigma = gains[sel]                                        # (t, K, I) rank-ordered
+        score = g2 * sigma                                        # (t, K, I)
+
+        flat = score.reshape(t, K * I)                            # (t, K*I)
+        # global top-B channels per token; count how many fall in each expert.
+        topk_idx = torch.topk(flat, B, dim=1, sorted=False).indices  # (t, B)
+        expert_of = topk_idx // I                                 # (t, B) in 0..K-1
+        t_k = torch.zeros((t, K), dtype=torch.long, device=device)
+        t_k.scatter_add_(1, expert_of, torch.ones_like(expert_of, dtype=torch.long))
+        out[start:stop] = t_k
 
     return out

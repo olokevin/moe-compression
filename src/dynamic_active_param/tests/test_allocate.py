@@ -187,3 +187,71 @@ def test_coverage_monotone_in_budget():
     k_large = allocate_budgets(w, sel, None, round(0.7 * K * I), k_min, I,
                                criterion="coverage_alloc", prefix_sums=prefix)
     assert torch.all(k_large >= k_small), "counts must not shrink as budget grows"
+
+
+# --------------------------------------------------------------------------
+# pivchol_global (Level 1)
+# --------------------------------------------------------------------------
+
+def _monotone_gains(E, I, seed=0):
+    """Per-expert monotone-non-increasing marginal gains (rank order)."""
+    g = torch.Generator().manual_seed(seed)
+    raw = torch.rand(E, I, generator=g) + 1e-3
+    return torch.sort(raw, dim=1, descending=True).values
+
+
+def test_pivchol_requires_gains():
+    with pytest.raises(ValueError):
+        allocate_budgets(
+            torch.rand(3, 4), torch.zeros(3, 4, dtype=torch.long), None,
+            B=100, k_min=0, I=64, criterion="pivchol_global", gains=None,
+        )
+
+
+def test_pivchol_budget_conservation_and_bounds():
+    T, K, E, I = 200, 4, 32, 128
+    B = round(0.5 * K * I)
+    w, sel = _rand_topk(T, K, E, seed=21)
+    gains = _monotone_gains(E, I, seed=21)
+    k = allocate_budgets(w, sel, None, B, 0, I,
+                         criterion="pivchol_global", gains=gains)
+    assert k.shape == (T, K)
+    assert torch.all(k.sum(dim=1) == B), "pivchol budget must be met exactly"
+    assert torch.all(k >= 0) and torch.all(k <= I), "bounds violated"
+
+
+def test_pivchol_rho_one_keeps_all():
+    I, K, E = 64, 4, 20
+    B = K * I  # rho = 1
+    w, sel = _rand_topk(30, K, E, seed=23)
+    gains = _monotone_gains(E, I, seed=23)
+    k = allocate_budgets(w, sel, None, B, 0, I,
+                         criterion="pivchol_global", gains=gains)
+    assert torch.all(k == I), "rho=1 must keep all channels (pivchol)"
+
+
+def test_pivchol_higher_g_gets_more():
+    # Equal gains across experts => g^2 alone decides; higher-g expert gets >=.
+    I, K = 64, 4
+    B = 40
+    w = torch.tensor([[0.5, 0.3, 0.15, 0.05]])
+    sel = torch.tensor([[0, 1, 2, 3]])
+    gains = torch.ones(4, I)  # identical gain curves
+    k = allocate_budgets(w, sel, None, B, 0, I,
+                         criterion="pivchol_global", gains=gains)[0]
+    assert k.sum() == B
+    assert torch.all(k[:-1] >= k[1:]), f"higher-g expert should get >= budget: {k}"
+
+
+def test_pivchol_dominated_expert_can_get_zero():
+    # One expert has tiny g AND tiny gains; with a small budget it should be
+    # starved to 0 (the intended expert-dropping-emerges behavior).
+    I, K = 64, 2
+    B = 20
+    w = torch.tensor([[0.99, 0.01]])
+    sel = torch.tensor([[0, 1]])
+    gains = torch.stack([torch.ones(I), torch.full((I,), 1e-3)], dim=0)
+    k = allocate_budgets(w, sel, None, B, 0, I,
+                         criterion="pivchol_global", gains=gains)[0]
+    assert k.sum() == B
+    assert k[1] == 0, f"dominated expert should be starved to 0: {k}"

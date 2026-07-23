@@ -1,0 +1,37 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B",
+  "train_mode": "mobe",
+  "compression_ratio": 0.75,
+  "moe_basis_count": 32,
+  "moe_basis_rank": 768,
+  "rfid_xi": 0.8,
+  "tasks": "hellaswag,mmlu",
+  "before_compression": {
+    "ppl/wikitext2": 8.702866096576729,
+    "ppl/c4": 14.054880868303373,
+    "lm_eval/hellaswag": 0.7768372834096794
+  },
+  "after_compression": {
+    "ppl/wikitext2": 9.593690483656781,
+    "ppl/c4": 15.980906428193414,
+    "lm_eval/hellaswag": 0.736705835490938,
+    "lm_eval/mmlu": 0.7723258795043441
+  },
+  "compression_ppl": {
+    "wikitext2": 9.593690483656781,
+    "c4": 15.980906428193414
+  },
+  "history": {
+    "-1": {
+      "ppl/wikitext2": 8.702866096576729,
+      "ppl/c4": 14.054880868303373,
+      "lm_eval/hellaswag": 0.7768372834096794
+    },
+    "0": {
+      "ppl/wikitext2": 9.593690483656781,
+      "ppl/c4": 15.980906428193414,
+      "lm_eval/hellaswag": 0.736705835490938,
+      "lm_eval/mmlu": 0.7723258795043441
+    }
+  }
+}

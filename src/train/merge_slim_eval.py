@@ -120,6 +120,41 @@ def main(args, model, tokenizer):
         channel_metric = dynamic_alloc_cfg.get("channel_metric", "activation")
         k_min = dynamic_alloc_cfg.get("k_min", 16)
 
+        # Level 1 — pivoted-Cholesky global g^2 selection: the artifact is built
+        # from the model's down_proj weights + cached activation Gram (not from
+        # expert_scores.pth), so it takes a different builder. Everything else
+        # (install, keep-mask, eval) is the shared dynamic path.
+        if criterion == "pivchol_global":
+            from src.dynamic_active_param.pivchol import build_pivchol_artifact
+
+            lambda_r = dynamic_alloc_cfg.get("lambda_r", 1.0)
+            _print(
+                f"\n[Step 3] Dynamic allocation (criterion=pivchol_global, "
+                f"lambda_r={lambda_r})"
+            )
+            artifact = build_pivchol_artifact(
+                model,
+                scores_dir=args.scores_dir,
+                lambda_r=lambda_r,
+                device=args.device,
+                verbose=True,
+            )
+            model = install_dynamic_alloc(
+                model,
+                artifact,
+                prune_ratio=prune_ratio,
+                criterion=criterion,
+                k_min=k_min,
+                verbose=True,
+            )
+            _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
+            total_params_after_slim = count_params(model)
+            _print(f"[Info] Params unchanged (masking simulation): {total_params_after_slim:,}")
+            _print(f"\n[Step 6] Start evaluation...")
+            results = eval_dispatch(args, model, tokenizer, verbose=True)
+            _print(f"[Step 6] ✅ Evaluation results: {results}")
+            return
+
         # The leverage metric may be absent from an older scores_dir; collect it
         # (and covariances, which we don't use here) on-the-fly, same trigger as
         # the static Nyström path. Skipped entirely when the v2 artifact cache

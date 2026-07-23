@@ -1,0 +1,42 @@
+# Level 1 — global g²-weighted nested channel selection (pivoted-Cholesky).
+# Pools all K=8 active experts' channels per token, scores each by g_k²·σ_{k,r}
+# (σ = pivoted-Cholesky marginal gain), keeps the global top-B under one shadow
+# price — per-expert quotas emerge (a dominated expert may get 0). 50% budget.
+# Masking simulation, no fine-tuning, no physical slimming. HellaSwag 0-shot.
+# See docs/results/dynamic_active_param/plan/plan_level1.md.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.50
+  dynamic_alloc:
+    enabled: true
+    criterion: "pivchol_global"
+    lambda_r: 1.0
+    k_min: 0
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_dynamic_pivchol_lev50_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

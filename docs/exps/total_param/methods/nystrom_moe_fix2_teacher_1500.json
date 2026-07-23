@@ -1,0 +1,37 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+  "train_mode": "nystrom_moe",
+  "compression_ratio": 0.67,
+  "moe_basis_count": 32,
+  "moe_basis_rank": null,
+  "rfid_xi": 0.8,
+  "tasks": "hellaswag,mmlu",
+  "before_compression": {
+    "ppl/wikitext2": 7.292182483815704,
+    "ppl/c4": 12.45746250039489,
+    "lm_eval/hellaswag": 0.785700059749054
+  },
+  "after_compression": {
+    "ppl/wikitext2": 13.07974332084759,
+    "ppl/c4": 17.74663150696581,
+    "lm_eval/hellaswag": 0.6597291376219877,
+    "lm_eval/mmlu": 0.6124483691781798
+  },
+  "compression_ppl": {
+    "wikitext2": 13.07974332084759,
+    "c4": 17.74663150696581
+  },
+  "history": {
+    "-1": {
+      "ppl/wikitext2": 7.292182483815704,
+      "ppl/c4": 12.45746250039489,
+      "lm_eval/hellaswag": 0.785700059749054
+    },
+    "0": {
+      "ppl/wikitext2": 13.07974332084759,
+      "ppl/c4": 17.74663150696581,
+      "lm_eval/hellaswag": 0.6597291376219877,
+      "lm_eval/mmlu": 0.6124483691781798
+    }
+  }
+}

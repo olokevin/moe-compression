@@ -1,0 +1,43 @@
+{
+  "model": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+  "layer": 46,
+  "tokens_T": 32768,
+  "num_experts": 128,
+  "d_mlp": 768,
+  "top_k": 8,
+  "lambda_ridge": 0.01,
+  "keep_k": 512,
+  "tokens_per_expert": {
+    "min": 0,
+    "mean": 2048.0,
+    "max": 11937
+  },
+  "energy": {
+    "total": 608020065157120.0,
+    "diag_block": 179000110471301.88,
+    "off_diag": 429019954685818.1,
+    "off_diag_fraction": 0.7056016392731282,
+    "per_expert_offdiag_fraction_mean": 0.7779688835144043,
+    "per_expert_offdiag_fraction_std": 0.1638094186782837
+  },
+  "pushthrough_validation_max_rel_err": 6.209652000097468e-05,
+  "leverage_compare": {
+    "top_k": 512,
+    "full_vs_matched_blockdiag": {
+      "note": "isolates pure cross-expert/off-diagonal effect (same /T norm & \u03bb)",
+      "per_expert_overlap_mean": 0.9592874646186829,
+      "per_expert_overlap_std": 0.019287891685962677,
+      "per_expert_overlap_min": 0.88671875,
+      "per_expert_spearman_mean": 0.9777072668075562,
+      "global_spearman": 0.9923914517759747
+    },
+    "full_vs_pipeline_perexpert": {
+      "note": "vs today's channel-selection score (z_e\u1d40z_e/T_e)",
+      "per_expert_overlap_mean": 0.9512560367584229,
+      "per_expert_overlap_std": 0.026199353858828545,
+      "per_expert_overlap_min": 0.869140625,
+      "per_expert_spearman_mean": 0.9679498076438904
+    }
+  },
+  "runtime_s": 21.968472957611084
+}

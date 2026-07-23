@@ -1,0 +1,51 @@
+{
+  "title": "MoBE mechanism: grouped-SVD init into a small shared basis + a large per-expert-partitioned core, reconstructed with a weight-space nonlinearity",
+  "canvas": {"width": 1080, "height": 460},
+  "style": {
+    "font_family": "Helvetica, Arial, sans-serif",
+    "font_size": 14,
+    "bg_color": "#FFFFFF"
+  },
+  "nodes": [
+    {"id": "w1", "label": "W₁  (p×d)", "x": 100, "y": 118, "width": 120, "height": 34, "shape": "rect", "fill": "#EFF6FF", "stroke": "#93C5FD", "text_color": "#1F2937", "font_size": 13},
+    {"id": "w2", "label": "W₂  (p×d)", "x": 100, "y": 162, "width": 120, "height": 34, "shape": "rect", "fill": "#EFF6FF", "stroke": "#93C5FD", "text_color": "#1F2937", "font_size": 13},
+    {"id": "w3", "label": "W₃  (p×d)", "x": 100, "y": 206, "width": 120, "height": 34, "shape": "rect", "fill": "#EFF6FF", "stroke": "#93C5FD", "text_color": "#1F2937", "font_size": 13},
+    {"id": "w4", "label": "W₄  (p×d)", "x": 100, "y": 250, "width": 120, "height": 34, "shape": "rect", "fill": "#EFF6FF", "stroke": "#93C5FD", "text_color": "#1F2937", "font_size": 13},
+
+    {"id": "svd", "label": "Grouped\nSVD", "x": 300, "y": 184, "width": 108, "height": 64, "shape": "rounded", "fill": "#F5F3FF", "stroke": "#C4B5FD", "text_color": "#1F2937"},
+
+    {"id": "bcore", "label": "Small core  B", "sublabel": "shared basis  m·r·d  (one, all experts)", "x": 540, "y": 96, "width": 216, "height": 52, "shape": "rounded", "fill": "#ECFDF5", "stroke": "#34D399", "text_color": "#065F46", "font_size": 13},
+
+    {"id": "a1", "label": "A₁   (→ expert 1)", "x": 540, "y": 200, "width": 216, "height": 38, "shape": "rect", "fill": "#FFF7ED", "stroke": "#FB923C", "text_color": "#9A3412", "font_size": 13},
+    {"id": "a2", "label": "A₂   (→ expert e)", "x": 540, "y": 246, "width": 216, "height": 38, "shape": "rect", "fill": "#FFEDD5", "stroke": "#EA580C", "text_color": "#7C2D12", "font_size": 13},
+    {"id": "a3", "label": "A₃   (→ expert 3)", "x": 540, "y": 292, "width": 216, "height": 38, "shape": "rect", "fill": "#FFF7ED", "stroke": "#FB923C", "text_color": "#9A3412", "font_size": 13},
+    {"id": "a4", "label": "A₄   (→ expert 4)", "x": 540, "y": 338, "width": 216, "height": 38, "shape": "rect", "fill": "#FFF7ED", "stroke": "#FB923C", "text_color": "#9A3412", "font_size": 13},
+
+    {"id": "mix", "label": "f( Σₖ αₑ,ₖ · Bₖ )", "sublabel": "mix bases + SiLU (weight space)", "x": 810, "y": 96, "width": 210, "height": 60, "shape": "rounded", "fill": "#F5F3FF", "stroke": "#A78BFA", "text_color": "#5B21B6"},
+
+    {"id": "recon", "label": "Ŵₑ", "sublabel": "expert e  = Aₑ·f(·)", "x": 990, "y": 210, "width": 128, "height": 84, "shape": "circle", "fill": "#F0FDFA", "stroke": "#2DD4BF", "text_color": "#0F766E"}
+  ],
+  "edges": [
+    {"from": "w1", "to": "svd", "color": "#94A3B8"},
+    {"from": "w2", "to": "svd", "color": "#94A3B8"},
+    {"from": "w3", "to": "svd", "color": "#94A3B8"},
+    {"from": "w4", "to": "svd", "color": "#94A3B8"},
+    {"from": "svd", "to": "bcore", "label": "shared basis", "color": "#10B981"},
+    {"from": "svd", "to": "a1", "color": "#FDBA74", "thickness": 1},
+    {"from": "svd", "to": "a2", "label": "one slice / expert", "color": "#F97316"},
+    {"from": "svd", "to": "a3", "color": "#FDBA74", "thickness": 1},
+    {"from": "svd", "to": "a4", "color": "#FDBA74", "thickness": 1},
+    {"from": "bcore", "to": "mix", "label": "mix + f", "color": "#7C3AED"},
+    {"from": "mix", "to": "recon", "color": "#0D9488"},
+    {"from": "a2", "to": "recon", "label": "Aₑ ·", "color": "#EA580C"}
+  ],
+  "groups": [
+    {"id": "g_experts", "label": "n experts — stack gate/up, group ~4–8", "node_ids": ["w1", "w2", "w3", "w4"], "fill": "#F8FAFC", "stroke": "#CBD5E1", "padding": 28},
+    {"id": "g_large", "label": "Large core  {Aₑ}  —  partitioned, one slice per expert  (n · p×r)", "node_ids": ["a1", "a2", "a3", "a4"], "fill": "#FFFBF5", "stroke": "#FDBA74", "padding": 28}
+  ],
+  "labels": [
+    {"text": "MoBE:  small shared basis  +  large per-expert core,  reconstructed with a weight-space nonlinearity", "x": 540, "y": 28, "font_size": 15, "color": "#111827", "anchor": "middle"},
+    {"text": "①  Initialize  (grouped SVD)", "x": 300, "y": 432, "font_size": 13, "color": "#6B7280", "anchor": "middle"},
+    {"text": "②  Reconstruct expert e :   Ŵₑ = Aₑ · f( Σₖ αₑ,ₖ Bₖ )", "x": 820, "y": 432, "font_size": 13, "color": "#6B7280", "anchor": "middle"}
+  ]
+}

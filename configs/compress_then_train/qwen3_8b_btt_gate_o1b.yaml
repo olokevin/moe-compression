@@ -1,0 +1,67 @@
+# Mixture-of-Basis BTT (mix_btt) — plain BTT baseline (alpha=I, f=identity, NO local fit) — output_one_block.
+#
+# Compress ONLY model.layers.*.mlp.gate_proj of Qwen3-8B (a DENSE model) at
+# compression_ratio=0.67 (retain 67% => -33% of that projection). Activation f
+# = SiLU applied on the MIXED cores (weight-space): Ŵ_j = L_jᵀ·f(Σ_k softmax(α)_{j,k} R_k)
+# is a dense weight block, fit data-free with ‖W−Ŵ‖² via fit_layer_basis (verbatim).
+# One-shot: local fit only, NO CE recovery. Eval on HellaSwag (0-shot) + MMLU (5-shot).
+#
+# Launch on A100 (1 GPU; Qwen3-8B bf16 ≈16GB fits). See docs/results/mix_btt/plan.md.
+
+model_name_or_path: Qwen/Qwen3-8B
+# NOTE: attn_implementation is set via the ATTN_IMPLEMENTATION=sdpa env var at
+# launch (not a config key). See the launch block in docs/results/mix_btt/plan.md.
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+no_wandb: true
+
+# ── Mixed per-module compression: gate_proj = mix_btt(0.67), everything else dense ─
+compression_rules:
+  - pattern: 'model\.layers\.\d+\.mlp\.gate_proj$'
+    method: btt
+    compression_ratio: 0.67
+
+# ── mix_btt: plain BTT baseline (alpha=I, f=identity, NO local fit) — output_one_block.
+decomp_mode: output_one_block    # MoBE↔input-block correspondence needs m=1
+mix_btt_space: weight
+mix_btt_use_mix: true
+mix_btt_use_nonlin: true
+mix_btt_ws_fit_lr: 0.07          # MoBE default (weight-space fit; no lr sweep needed)
+mix_btt_ws_fit_iters: 30000
+mix_btt_snapshot_every: 200
+moe_fit_log_every: 2000
+
+calib_source: c4                 # unused by weight-space fit, but the loader is built
+calib_num_seqs: 128
+calib_max_length: 2048
+calib_batch_size: 2
+calib_seed: 3
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+# ── One-shot: decompose + eval only, NO recovery training ─────────────────────
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── Benchmarking: HellaSwag (0-shot) + MMLU (5-shot) ──────────────────────────
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: true
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1                # full tasks
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048

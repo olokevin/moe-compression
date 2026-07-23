@@ -1,0 +1,63 @@
+# Phase 1 of the even-split 33% MoBE run: FIT + SAVE ONLY (no eval).
+#
+# Companion to qwen3_30b_a3b_mobe_33_even.yaml. Run this with MODEL_ON_CPU=1 on a
+# single small GPU (the data-free weight-space fit moves one layer's stacked
+# expert weights to the GPU at a time; the 61GB model stays on CPU). It writes
+# <run_dir>/compressed_model/hf_reconstructed/, which Phase 2 evaluates with
+# multi-GPU sharding once GPUs free up. PPL + lm-eval are DISABLED here because
+# they would run against the CPU-resident model.
+#
+# Launch (single GPU, model on CPU):
+#   CUDA_VISIBLE_DEVICES=7 MODEL_ON_CPU=1 ATTN_IMPLEMENTATION=sdpa \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   .venv/bin/python src/compress_then_train.py --config <this>
+
+model_name_or_path: Qwen/Qwen3-30B-A3B
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── MoBE decomposition (data-free), all three matrices ────────────────────────
+train_mode: mobe
+compression_ratio: 0.67
+moe_basis_count: 38              # m -> gamma=0.672 on each of gate/up/down (32.8%)
+moe_basis_rank: 768              # r = p
+moe_compress_down: true          # ALSO factorize down_proj (output-side basis)
+moe_fit_iters: 2000
+moe_fit_lr: 0.07
+moe_fit_patience: 0
+moe_z_norm: true
+moe_fit_log_every: 500
+moe_save_native: true
+moe_save_hf_reconstructed: true
+
+calib_source: c4
+eval_ppl_after_compression: false   # DISABLED (model on CPU)
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── No eval in Phase 1 (deferred to Phase 2 sharded run) ──────────────────────
+run_lm_eval: false
+eval_before_compression: false
+eval_after_compression: false
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048

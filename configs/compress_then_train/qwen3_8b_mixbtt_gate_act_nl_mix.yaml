@@ -1,0 +1,72 @@
+# Mixture-of-Basis BTT (mix_btt) — CELL 3: activation-space, nonlinearity + mix.
+#
+# Compress ONLY model.layers.*.mlp.gate_proj of Qwen3-8B at compression_ratio=0.67.
+# Activation f = SiLU on the DATA PATH (activation-space) AND a learnable n×n
+# basis-mixing matrix α (init = I). Fit is activation-space E_x‖Wx − mixBTT(x)‖²
+# via fit_mix_btt_layer over captured C4 activations.
+# Cell 1 vs cell 3 probes weight-space-MoBE vs activation-space-BTT for the full
+# config; cell 2 vs cell 3 isolates the mixture-of-basis contribution.
+# One-shot: local fit only, NO CE recovery. Eval on HellaSwag (0-shot) + MMLU (5-shot).
+#
+# fit_lr/iters below are the pre-study defaults; UPDATE from scripts/mix_btt_fit_scan.py.
+
+model_name_or_path: Qwen/Qwen3-8B
+# NOTE: attn_implementation is set via the ATTN_IMPLEMENTATION=sdpa env var at launch.
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+no_wandb: true
+
+# ── Mixed per-module compression: gate_proj = mix_btt(0.67), everything else dense ─
+compression_rules:
+  - pattern: 'model\.layers\.\d+\.mlp\.gate_proj$'
+    method: mix_btt
+    compression_ratio: 0.67
+
+# ── mix_btt: CELL 3 (activation-space, nonlin + learnable mix) ────────────────
+decomp_mode: output_one_block
+mix_btt_space: activation
+mix_btt_use_mix: true            # learn the n×n basis-mixing matrix α (init = I)
+mix_btt_use_nonlin: true
+# Locked from the pre-study scan (docs/results/mix_btt/fit_scan.json): lr=1e-3,
+# iters=3000 (see cell-2 config for rationale — robust vs 3e-3 overshoot at depth).
+mix_btt_fit_lr: 1.0e-3
+mix_btt_fit_iters: 3000
+mix_btt_fit_patience: 0
+mix_btt_snapshot_every: 200
+mix_btt_cap_tokens: 8192
+moe_fit_log_every: 200
+
+calib_source: c4
+calib_num_seqs: 128
+calib_max_length: 2048
+calib_batch_size: 2
+calib_seed: 3
+eval_ppl_after_compression: true
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+# ── One-shot: decompose + eval only, NO recovery training ─────────────────────
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── Benchmarking: HellaSwag (0-shot) + MMLU (5-shot) ──────────────────────────
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: true
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048
