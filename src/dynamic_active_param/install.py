@@ -33,6 +33,9 @@ def install_dynamic_alloc(
     criterion: str = "router_prob",
     k_min: int = 16,
     verbose: bool = True,
+    beta: float = 1.0,
+    col_norm=None,
+    pubsub_artifact=None,
 ):
     """Bind the dynamic MoE forward onto every MoE block of ``model``.
 
@@ -50,11 +53,26 @@ def install_dynamic_alloc(
     I = _get_moe_intermediate_size(model)
     K = _get_topk(model)
     B = int(round((1.0 - prune_ratio) * K * I))
-    B = max(K * k_min, min(B, K * I))  # keep feasible
+    # Cross-expert criteria emerge per-expert quotas from a global threshold, so
+    # they impose no k_min floor (a dominated expert may get 0 channels).
+    cross_expert = criterion in ("oracle_mag", "pubsub")
+    if not cross_expert:
+        B = max(K * k_min, min(B, K * I))  # keep feasible
+    else:
+        B = min(B, K * I)
+    # Number of MoE layers to install over (artifact.L for the router-only path;
+    # pubsub carries its own L; oracle_mag derives it below).
+    if pubsub_artifact is not None:
+        n_moe_layers = pubsub_artifact.L
+    elif artifact is not None:
+        n_moe_layers = artifact.L
+    else:
+        n_moe_layers = None
 
+    metric_str = artifact.channel_metric if artifact is not None else criterion
     if verbose:
         _print(
-            f"[DynamicAlloc] Installing: criterion={criterion}, metric={artifact.channel_metric}, "
+            f"[DynamicAlloc] Installing: criterion={criterion}, metric={metric_str}, "
             f"K={K}, I={I}, prune_ratio={prune_ratio}, B={B} (of K*I={K*I}), k_min={k_min}"
         )
 
@@ -70,25 +88,40 @@ def install_dynamic_alloc(
         if experts is None:
             continue
 
-        if mask_idx >= artifact.L:
+        if n_moe_layers is not None and mask_idx >= n_moe_layers:
             raise IndexError(
-                f"More MoE layers than artifact layers ({artifact.L}); "
+                f"More MoE layers than artifact layers ({n_moe_layers}); "
                 "scores_dir does not match this model."
             )
 
         block_device = next(moe_block.parameters()).device
-        moe_block._dyn_ranks = artifact.channel_rank[mask_idx].to(block_device)   # (E, I) long
-        moe_block._dyn_contrib = artifact.contrib[mask_idx].to(block_device)      # (E,) float
-        # prefix sums only needed by coverage_alloc; keep it off other blocks.
-        if criterion == "coverage_alloc":
-            moe_block._dyn_prefix = artifact.prefix_sums[mask_idx].to(block_device)  # (E, I) float
-        else:
-            moe_block._dyn_prefix = None
-        # pivoted-Cholesky marginal gains only needed by pivchol_global.
-        if criterion == "pivchol_global":
-            moe_block._dyn_gains = artifact.gains[mask_idx].to(block_device)  # (E, I) float
-        else:
-            moe_block._dyn_gains = None
+        # router-only ranking tensors (unused by cross-expert criteria).
+        if artifact is not None:
+            moe_block._dyn_ranks = artifact.channel_rank[mask_idx].to(block_device)   # (E, I) long
+            moe_block._dyn_contrib = artifact.contrib[mask_idx].to(block_device)      # (E,) float
+        moe_block._dyn_prefix = (
+            artifact.prefix_sums[mask_idx].to(block_device) if criterion == "coverage_alloc" else None
+        )
+        moe_block._dyn_gains = (
+            artifact.gains[mask_idx].to(block_device) if criterion == "pivchol_global" else None
+        )
+        moe_block._dyn_beta = float(beta)
+
+        # oracle_mag: exact per-token magnitude needs the down_proj column norms.
+        if criterion == "oracle_mag":
+            cn = torch.stack(
+                [e.down_proj.weight.detach().float().norm(dim=0) for e in experts], dim=0
+            )  # (E, I) = ||W_down[:, j]||_2 per expert/channel
+            moe_block._dyn_col_norm = cn.to(block_device)
+
+        # pubsub: private ranks/gains + public carriers.
+        if criterion == "pubsub":
+            pa = pubsub_artifact
+            moe_block._dyn_pub_pivrank = pa.pivrank_priv[mask_idx].to(block_device)  # (E, I)
+            moe_block._dyn_pub_gains = pa.gains_priv[mask_idx].to(block_device)      # (E, I)
+            moe_block._dyn_pub_carrier_idx = pa.carrier_idx[mask_idx].to(block_device)  # (r, E)
+            moe_block._dyn_pub_carrier_val = pa.carrier_val[mask_idx].to(block_device)  # (r, E)
+
         moe_block._dyn_B = B
         moe_block._dyn_k_min = int(k_min)
         moe_block._dyn_I = int(I)

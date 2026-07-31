@@ -320,9 +320,31 @@ class KDDecompositionConfig:
     moe_compress_down: bool = field(
         default=False,
         metadata={"help": (
-            "MoBE only: also factorize down_proj with the shared basis on its "
-            "OUTPUT (hidden d) side (fit on down_projᵀ), spreading compression "
-            "evenly across gate/up/down. Default False = classic MoBE (down dense)."
+            "MoBE only: also factorize down_proj. Basis side is set by "
+            "moe_down_basis_side. Default False = classic MoBE (down dense)."
+        )},
+    )
+    moe_compress_gate_up: bool = field(
+        default=True,
+        metadata={"help": (
+            "MoBE only: factorize gate_proj/up_proj (classic MoBE). Set False to "
+            "compress down_proj ONLY (requires moe_compress_down=true)."
+        )},
+    )
+    moe_down_basis_side: str = field(
+        default="output",
+        metadata={"help": (
+            "MoBE only: where down_proj's shared basis lives — 'output' (span "
+            "hidden d, fit down_projᵀ) or 'input' (span intermediate p, fit the "
+            "weight directly)."
+        )},
+    )
+    moe_basis_rank_down: Optional[int] = field(
+        default=None,
+        metadata={"help": (
+            "MoBE only: basis rank r for down_proj. Defaults to moe_basis_rank. "
+            "Use to hit a target reduction when the down basis side's column dim "
+            "differs from gate/up (e.g. input-side down: r_down=439 -> 37.5%)."
         )},
     )
     rfid_xi: float = field(
@@ -1329,6 +1351,9 @@ def decompose_model(model, tokenizer, decomp_args: KDDecompositionConfig,
             "z_norm": decomp_args.moe_z_norm,
             "log_every": decomp_args.moe_fit_log_every,
             "compress_down": decomp_args.moe_compress_down,
+            "compress_gate_up": decomp_args.moe_compress_gate_up,
+            "down_basis_side": decomp_args.moe_down_basis_side,
+            "r_down": decomp_args.moe_basis_rank_down,
             "xi": decomp_args.rfid_xi,
             # Nyström-MoE knobs (ignored by mobe/rfid).
             "nystrom_keep_ratio": decomp_args.nystrom_keep_ratio,

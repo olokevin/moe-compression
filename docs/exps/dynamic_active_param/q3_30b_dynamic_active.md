@@ -126,6 +126,21 @@ stderr ≈ 0.43–0.44pt on acc_norm for all rows.
   cross-expert (Level 3) method. See `plan/plan_level1.md`,
   `plan/plan_level1_impl.md`, and the sweep table below.
 
+### Takeaways
+
+- **Budget-aware allocation clearly helps.** Both `router_prob` configs (75.96 /
+  76.13% acc_norm) beat the same-active-budget uniform baselines (66.29% uniform
+  nystrom, 69.54% MoBE) by **+6 to +10 pts**, with zero fine-tuning and no
+  physical slimming — the per-token, per-expert budget split is doing real work.
+- **`router_prob` ≫ `contribution`.** Per-token softmax weight (76.1%) far
+  outperforms the calibration-averaged per-expert contribution (67.8 / 69.5%),
+  which barely edges out uniform. Expected: `expert_out_token_contrib` is a
+  fixed per-expert scalar, so `contribution` only varies through *which* experts
+  a token picks — it is not truly per-token. `router_prob` is.
+- **leverage ≥ activation** for channel ranking under both criteria
+  (prob: 76.13 vs 75.96; contrib: 69.46 vs 67.79), consistent with the static
+  Nyström story — but the gap is small (<0.2pt) under the stronger `router_prob`.
+
 ## Level 1 — Global g²-weighted nested channel selection (`pivchol_global`)
 
 Realizes `plan/plan_level1.md`. Replaces the current method's three components:
@@ -198,20 +213,225 @@ destroying expert capacity, so the baseline's redundant-channel double-spend and
 low-g over-feeding cost it more; Level 1's redundancy-aware global selection holds
 up. This corroborates the HellaSwag trend on a second, harder benchmark.
 
-## Takeaways
+## Level 2 — cross-expert selection (`oracle_mag`, `pubsub`)
 
-- **Budget-aware allocation clearly helps.** Both `router_prob` configs (75.96 /
-  76.13% acc_norm) beat the same-active-budget uniform baselines (66.29% uniform
-  nystrom, 69.54% MoBE) by **+6 to +10 pts**, with zero fine-tuning and no
-  physical slimming — the per-token, per-expert budget split is doing real work.
-- **`router_prob` ≫ `contribution`.** Per-token softmax weight (76.1%) far
-  outperforms the calibration-averaged per-expert contribution (67.8 / 69.5%),
-  which barely edges out uniform. Expected: `expert_out_token_contrib` is a
-  fixed per-expert scalar, so `contribution` only varies through *which* experts
-  a token picks — it is not truly per-token. `router_prob` is.
-- **leverage ≥ activation** for channel ranking under both criteria
-  (prob: 76.13 vs 75.96; contrib: 69.46 vs 67.79), consistent with the static
-  Nyström story — but the gap is small (<0.2pt) under the stronger `router_prob`.
+Level 1's scoring matrix `Θ_k` is **block-diagonal**: channels are ranked
+within-expert, so a low-probability expert may spend budget on channels already
+covered by a co-activated high-probability expert. Level 2 asks how much this
+costs and whether a cross-expert method recovers it. Realizes
+`plan/plan_level2_impl.md`. Two runnable selectors, both selecting a per-token
+**global top-B over the pooled K·I channels** of a token's active experts:
+
+- **`oracle_mag` (Oracle-A ceiling).** Scores each channel by its *exact
+  per-token* output magnitude `g_e·|inter_{e,j}(x)|·‖W_down[:,j]‖` and keeps the
+  global top-B. Block-diagonal (no off-diagonal coupling) but uses the true
+  per-token activation instead of only the router `g` — so it upper-bounds every
+  router-only offline method. The gap `oracle_mag − Level-1` is the value of
+  per-token activation information.
+- **`pubsub` (the Level-2 method).** Offline, builds a shared **public basis**
+  `U` = top-r eigenvectors of `Σ_e W_down_e G_e W_down_eᵀ` (directions many
+  experts write into), deflates each expert's `down_proj` by `U`, and runs the
+  Level-1 pivoted Cholesky on the *private* residual → `σ^priv`. Online (router
+  only), for each public direction it force-keeps the single best-carrying
+  channel among the co-activated experts (dedup — load shared knowledge **once**),
+  then fills the rest by the Level-1 rule `g²·σ^priv`. Preserves prefix
+  contiguity; touches no expert weights beyond the ~57 MB artifact.
+
+### HellaSwag 0-shot — budget sweep (acc_norm)
+
+Level-1 and reduce-top-k rows carried from the sweep table above. `oracle_mag`
+and `pubsub` are new (masking simulation, no fine-tuning).
+
+| Reduction | reduce top-k | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) |
+| --------- | ------------ | ----------------- | --------------- | ------------------------ |
+| 50%       | 75.2 (8→4)  | 74.26             | 74.31           | **78.54**          |
+| 62.5%     | 69.8 (8→3)  | 70.54             | 70.51           | **78.76**          |
+| 75%       | 49.4 (8→2)  | 63.60             | 63.46           | **78.28**          |
+| 87.5%     | 26.2 (8→1)  | 44.15             | 44.66           | **76.84**          |
+
+Dense baseline 78.56. stderr ≈ 0.41–0.44pt on acc_norm.
+
+**Reads.**
+
+- **`pubsub` ≈ Level-1 at every budget** (Δ = +0.05 / −0.03 / −0.14 / +0.51pt,
+  all inside 1 stderr). Restoring cross-expert coupling — loading shared "public"
+  knowledge once and re-spending the freed budget on private channels — buys
+  **nothing** measurable. This is the decisive **M1 result**: the Oracle-B −
+  Level-1 gap is negligible, so the offline-cross-expert-scoring effort (Level 2
+  proper) is not worth the ≫57 MB pairwise statistics it would need. It confirms
+  the earlier stacked-covariance finding (cross-expert coupling holds ~70% of the
+  covariance energy but changes channel *selection* by <2%): the off-diagonal
+  mass is real but it does not move which channels you'd keep.
+- **`oracle_mag` stays near dense at every budget** (78.5 → 78.8 → 78.3 → 76.8
+  vs dense 78.56), beating Level-1 by **+4.3 / +8.2 / +14.7 / +32.7pt** and
+  losing <2pt even at a 7/8 cut. The entire remaining headroom is **per-token
+  activation information** (`|inter(x)|`), not cross-expert structure: the router
+  `g` alone (all offline methods) cannot tell which channels a *specific* token
+  actually lights up. `oracle_mag` is an unreachable ceiling (it reads the true
+  per-token intermediate), but it relocates the Level-2 target — the gap to close
+  is online per-token, not offline cross-expert.
+
+### MMLU 5-shot @ 75% reduction (acc)
+
+| Method | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) |
+| ------ | ----------------- | --------------- | ------------------------ |
+| −75%  | 70.81             | 71.03           | **80.53**          |
+
+Same pattern on the harder, knowledge-heavy benchmark: `pubsub` matches Level-1
+(+0.22pt), while `oracle_mag` recovers to **80.53** — essentially the full model
+(dense 5-shot MMLU is ~79.5) at a 75% active cut, +9.7pt over Level-1. Per-token
+activation information matters *more* on MMLU, consistent with its sensitivity to
+destroyed expert capacity.
+
+### M4 regime diagnostic — `g^{2β}` sharpness sweep (HellaSwag, −50%)
+
+Scores channels by `g^{2β}·σ` (β=1 is Level-1; β→∞ degenerates to reduce-top-k).
+
+| β       | 1 (Level 1) | 1.5   | 2     | 3     |
+| -------- | ----------- | ----- | ----- | ----- |
+| acc_norm | 74.26       | 74.51 | 74.54 | 74.54 |
+
+Sharpening the router weight helps only marginally (+0.28pt, ≈½ stderr) and
+saturates by β=2. The mid-budget Level-1-vs-reduce-top-k gap is **not** a
+score-dynamic-range problem — it is not closed by concentrating budget on the
+top experts, ruling out the simplest explanation and leaving cross-expert
+overlap as the (small, per the M1 result) residual.
+
+### M1 oracle ladder + M3 structure (reconstruction, ~2k C4 tokens, layer 46)
+
+_TBD — reconstruction relative-error ladder (`level1` / `pubsub` / `oracle_mag` /
+per-token OMP `oracle_exact`) and M3 coherence-vs-pivot-rank; from
+`scripts/level2_oracle_ladder.py`._
+
+## `oracle_mag` activation structure — why the down_proj is so sparsely driven
+
+`oracle_mag` recovers near-dense accuracy at a 7/8 active cut (76.84% acc_norm at
+ρ=0.125), which says the exact per-token output magnitude
+`s_{e,j}(x) = g_e·|inter_{e,j}(x)|·‖W_down[:,j]‖` is concentrated in a small
+fraction of the `K·I = 6144` channels each token actually pools. This section
+opens that up with calibration data: we replay the exact `oracle_mag` selection
+over **69,764 C4 tokens** (padding stripped) on the full un-slimmed
+`Qwen3-30B-A3B-Thinking-2507` (K=8, E=128, I=768, 48 MoE layers) and record, per
+layer, (1) how often each intermediate channel survives the per-token global
+top-B — the **activation frequency** — and (2) each token's sorted score profile
+and concentration. Capture: `scripts/oracle_mag_freq_capture.py` (A100-New, 8
+GPUs, sharded bf16/sdpa, ~5 min); the replay reproduces `block.py`'s
+`_cross_expert_keep` scoring exactly (verified: identical score tensor, 100%
+keep-mask agreement on a mock block). Plots: `scripts/oracle_mag_freq_plot.py`.
+Figures in `figures/oracle_mag/`; summary numbers in
+`figures/oracle_mag/stats.json`.
+
+**Activation frequency** of channel `(layer, e, j)` is its keep-count divided by
+its expert's route-count — i.e. *given the expert fired*, how often channel `j`
+lands in the token's kept budget. We report it at three budgets ρ ∈ {0.5, 0.25,
+0.125}. (A "budget-agnostic" static keep would sit at freq = ρ everywhere; the
+spread away from ρ is exactly the per-token dynamism `oracle_mag` exploits.)
+
+### Investigation 1 — per-channel activation frequency (heatmaps)
+
+![Per-layer keep-frequency heatmap grid, ρ=0.5](figures/oracle_mag/freq_grid_r0.500.png)
+
+*Figure: keep-frequency (kept | routed) for every MoE layer at ρ=0.5. Rows =
+experts (E=128), cols = channels (I=768). See `freq_layer{1,24,46}_r0.500.png`
+for single-layer full-res views and `freq_grid_r0.{250,125}.png` for the tighter
+budgets.*
+
+![Sorted per-channel keep-frequency by depth, ρ=0.5](figures/oracle_mag/freq_layer_sorted_r0.500.png)
+
+![Hot-channel fraction and mean frequency vs depth](figures/oracle_mag/freq_hot_by_depth.png)
+
+**Findings.**
+
+- **The dominant structure is horizontal banding — variance is between experts,
+  not between a fixed set of "always-on" channels.** Decomposing the per-channel
+  keep-frequency variance at ρ=0.5: **73.9% is *within*-expert** (channel-to-channel
+  inside one expert) and **26.1% is *between*-expert** (whole rows brighter/darker).
+  So there is no small, stable, cross-token set of "load-bearing channels" you
+  could prune to statically — a channel that is hot for one token is cold for the
+  next. This is the direct micro-level explanation for the earlier M1 result that
+  **router-only offline methods (Level-1, `pubsub`) cannot approach `oracle_mag`**:
+  the information is per-token, and no fixed keep-set captures it.
+- **Almost nothing is always-in or always-out.** At ρ=0.5, over well-sampled
+  channels (expert route ≥ 50): only **0.3%** are kept >95% of the time and only
+  **0.4%** are kept <5% of the time; **64.6%** sit in the mid band (0.4–0.6, i.e.
+  near ρ). At ρ=0.125 only **0.09%** of channels are hot (>0.5) and **6.3%** are
+  never kept. The keep decision is genuinely re-made per token.
+- **Within a single expert, channels still differ widely** (this is the 73.9%).
+  For a well-sampled expert at layer 24 the per-channel frequency spans e.g.
+  0.35 → 0.48 (median) → 0.89, with an average within-expert std of 0.083. So the
+  intra-expert ranking `oracle_mag` uses (`|inter_{e,j}|·‖W_down[:,j]‖`) is real
+  and token-dependent, not a static per-expert channel mask.
+- **The bright/dark bands are a routing-frequency artifact, not "super-channels".**
+  The few bright rows (expert-mean freq > 0.7: just 5 of 6144) are heavily-routed
+  experts (median route 5189); the dark rows (< 0.1: 66 rows) are **dead experts
+  that never fired** (median route 0 — 33 of 48 layers have ≥1 dead expert over
+  this calibration set). Among experts that *do* fire, mean keep-frequency is
+  tightly clustered (p5–p95 = 0.376–0.585 around ρ=0.5) and correlates only
+  moderately with log-route (r≈0.46): a token's own budget competition, not a
+  global "important expert" label, sets how many of an expert's channels survive.
+- **Sparsity is remarkably uniform with depth.** Mean keep-frequency tracks ρ
+  almost flat across all 48 layers (0.45–0.49 at ρ=0.5; 0.10–0.11 at ρ=0.125) —
+  no layer is systematically easier or harder to sparsify under `oracle_mag`.
+  The hot-channel fraction (freq>0.5, ρ=0.5) wobbles 0.31–0.46 with mild peaks at
+  the very first layers and a slow rise over the last ~10 layers, but the effect
+  is small. This says a **single global per-token budget B** (what `oracle_mag`
+  and the dynamic scheme already use) is well-matched to the model — there is no
+  strong case for a depth-dependent budget schedule.
+
+### Investigation 2 — per-token score profiles (is the pattern token-dependent?)
+
+For each token we sort its pooled `K·I` scores descending and look at the shape.
+Two views: individual normalized sorted curves (each thin line = one token,
+divided by its own sum so only *shape* is compared), and per-token concentration
+— participation ratio `PR = (Σs)²/Σs²` (the effective number of channels, = KI
+for a flat token, small for a peaky one) and the fraction of total score mass the
+top-B budget captures.
+
+![Per-token sorted score profiles, shallow/mid/deep layers](figures/oracle_mag/token_sorted_curves.png)
+
+![Per-token concentration (participation ratio + top-B mass) vs depth](figures/oracle_mag/token_concentration.png)
+
+**Findings.**
+
+- **Yes — tokens differ markedly at the same layer, and the difference is in the
+  *head* of the distribution.** The normalized sorted curves fan out most at low
+  rank (the top few channels): some tokens put >2% of their magnitude in a single
+  channel and decay fast (peaky), others start near ~1% and spread it out (flat).
+  All tokens share a common heavy tail that collapses only in the last ~5% of
+  channels. Concretely, the per-token participation ratio spans a **2.7×** range
+  within a layer (all-layer p10–p90 = 769–2099 effective channels of 6144); at
+  layer 1 the spread is **3.2×** (p10=498, p90=1620). So a fixed keep-fraction is
+  a poor per-token fit — exactly the slack a per-token budget (or the `oracle_mag`
+  global top-B) exploits, and which router-only methods, blind to `|inter(x)|`,
+  cannot see.
+- **Tokens are peaky in an absolute sense: ~25% of channels carry the magnitude.**
+  Median participation ratio is **1525 ≈ 24.8% of K·I**. At ρ=0.5 the kept budget
+  captures a median **89.6%** of each token's total score mass (p10–p90 =
+  87.6–92.1%); at ρ=0.25, **69.4%**; at ρ=0.125, **50.1%**. That the top 1/8 of
+  channels still holds half the magnitude is the concentration that lets
+  `oracle_mag` lose <2 pts at ρ=0.125 — but note the mass is spread over ~768
+  channels, not a handful, so the ceiling comes from *ranking every token's own
+  channels*, not from a sparse universal basis.
+- **The concentration pattern changes with depth — a shallow/deep "U".** Median
+  participation ratio is **lowest (most peaky) at the ends**: L1 ≈ 1057 (17.2%)
+  and L46 ≈ 1203 (19.6%), versus the **flattest at mid-depth** L24 ≈ 1834
+  (29.8%). Early and late layers concentrate each token's magnitude into fewer
+  channels; middle layers spread it. The per-token *heterogeneity* follows the
+  same U (spread 3.2× at L1 and 2.7× at L46 vs 1.6× at L24). Read together with
+  Investigation 1's flat mean-frequency: **the total budget the model needs is
+  depth-independent, but where within a token the magnitude sits (few vs many
+  channels) is not** — early/late layers are where per-token routing of the
+  budget has the most to gain, mid layers the least.
+
+**Takeaway for the method.** Both investigations point the same way as the M1
+oracle result: the headroom `oracle_mag` exposes is **per-token activation
+structure**, not a static or cross-expert one. There is no stable sparse keep-set
+(within-expert variance dominates, ~0.3% of channels are ever "always on"), and
+per-token concentration varies 2.7–3.2× at fixed depth — so the target for a
+practical Level-2 method is a cheap online predictor of `|inter_{e,j}(x)|` (or
+its rank), not more offline statistics. A uniform global budget B is already
+well-matched to depth, though early/late layers (peakier, more heterogeneous)
+are where a per-token budget would pay off most.
 
 ## Configs
 

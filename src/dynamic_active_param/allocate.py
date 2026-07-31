@@ -24,9 +24,45 @@ with hand-checkable small tensors.
 
 import torch
 
-__all__ = ["allocate_budgets"]
+__all__ = ["allocate_budgets", "select_global_topB"]
 
 _VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "pivchol_global")
+
+# Cross-expert (Level-2) criteria do their per-channel selection inside the block
+# forward (they need the actual per-token intermediate activations / a public
+# basis, which allocate_budgets never sees), so they are handled by
+# ``select_global_topB`` rather than ``allocate_budgets``.
+_CROSS_EXPERT_CRITERIA = ("oracle_mag", "pubsub")
+
+
+def select_global_topB(score: torch.Tensor, B: int, chunk: int = 4096) -> torch.Tensor:
+    """Per-token global top-``B`` selection over pooled ``K*I`` channel scores.
+
+    Args:
+        score: ``(T, K, I)`` float — per (token, expert-slot, channel) score. All
+            ``K`` slots are real experts (top-k routing always fills K), so no
+            padding sentinel is needed; callers may set individual entries to
+            ``+inf`` to force-keep or ``-inf`` to forbid.
+        B: channels to keep per token, pooled across its K experts.
+        chunk: token-chunk size bounding the flattened ``(chunk, K*I)`` topk.
+
+    Returns:
+        ``(T, K, I)`` bool keep-mask with exactly ``B`` True entries per token
+        (assuming ``B <= K*I`` and at most ``B`` ``+inf`` entries per token).
+    """
+    T, K, I = score.shape
+    B = int(B)
+    if B > K * I:
+        raise ValueError(f"Infeasible budget: B ({B}) > K*I ({K * I}).")
+    keep = torch.zeros((T, K, I), dtype=torch.bool, device=score.device)
+    for start in range(0, T, chunk):
+        stop = min(start + chunk, T)
+        flat = score[start:stop].reshape(stop - start, K * I)
+        idx = torch.topk(flat, B, dim=1, sorted=False).indices     # (t, B)
+        m = torch.zeros_like(flat, dtype=torch.bool)
+        m.scatter_(1, idx, True)
+        keep[start:stop] = m.reshape(stop - start, K, I)
+    return keep
 
 
 def allocate_budgets(
@@ -39,6 +75,7 @@ def allocate_budgets(
     criterion: str = "router_prob",
     prefix_sums: torch.Tensor = None,
     gains: torch.Tensor = None,
+    beta: float = 1.0,
 ) -> torch.Tensor:
     """Allocate per-token per-expert channel budgets.
 
@@ -60,6 +97,9 @@ def allocate_budgets(
         gains: ``(E, I)`` float, pivoted-Cholesky marginal gains in pivot-rank
             order (``gains[e, r]`` = gain of the channel at pivot rank ``r``).
             Required for ``pivchol_global``; ignored otherwise.
+        beta: sharpness exponent for ``pivchol_global`` — score each channel by
+            ``g_e^{2*beta} * sigma``. ``beta=1`` is Level-1; ``beta -> inf``
+            degenerates to reduce-top-k (M4 regime sweep). Ignored otherwise.
 
     Returns:
         ``(T, K)`` long tensor ``k`` with ``k_min <= k <= I`` and
@@ -89,6 +129,7 @@ def allocate_budgets(
             gains=gains,
             B=B,
             I=I,
+            beta=beta,
         )
 
     if K * k_min > B or B > K * I:
@@ -271,6 +312,7 @@ def _pivchol_allocate(
     gains: torch.Tensor,
     B: int,
     I: int,
+    beta: float = 1.0,
 ) -> torch.Tensor:
     """Level-1 global g^2-weighted nested selection (plan_level1.md online kernel).
 
@@ -301,9 +343,10 @@ def _pivchol_allocate(
         g = routing_weights[start:stop].to(torch.float32)         # (t, K)
         t = sel.shape[0]
 
-        g2 = (g * g).unsqueeze(-1)                                # (t, K, 1)
+        # g^{2*beta}; beta=1 -> Level-1, beta->inf -> reduce-top-k (M4 sweep).
+        gw = (g * g).unsqueeze(-1) if beta == 1.0 else g.unsqueeze(-1).pow(2.0 * beta)
         sigma = gains[sel]                                        # (t, K, I) rank-ordered
-        score = g2 * sigma                                        # (t, K, I)
+        score = gw * sigma                                        # (t, K, I)
 
         flat = score.reshape(t, K * I)                            # (t, K*I)
         # global top-B channels per token; count how many fall in each expert.

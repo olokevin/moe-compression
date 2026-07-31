@@ -1,5 +1,4 @@
-
-### Level-2: What to Measure
+# Level-2 Allocate cross-experts, score cross-experts
 
 Level-2 requires either per-pair statistics or a global coupling sketch — an order of magnitude more offline cost than the current 57 MB artifact, and it may sacrifice the prefix-contiguity that keeps the grouped GEMM regular. Before paying that, we quantify **how much accuracy the block-diagonal approximation actually forfeits**, and **in what structural form** the cross-expert redundancy appears.
 

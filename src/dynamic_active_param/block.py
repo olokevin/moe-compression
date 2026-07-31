@@ -3,28 +3,108 @@
 ``dynamic_moe_block_forward`` replaces ``Qwen3MoeSparseMoeBlock.forward`` /
 ``Qwen2MoeSparseMoeBlock.forward``. Routing / top-k is identical to upstream;
 the only change is that, per token, a fixed channel budget ``B`` is split
-across its K experts (``allocate_budgets``) and each expert keeps only its top
-``k_{t,e}`` channels by precomputed rank — the rest of the SwiGLU intermediate
-is zeroed before ``down_proj`` (fake pruning, so ``down_proj`` runs at full
-width with original weights: no Nyström correction).
+across its K experts and each expert keeps only its top ``k_{t,e}`` channels
+(by precomputed rank) — the rest of the SwiGLU intermediate is zeroed before
+``down_proj`` (fake pruning, so ``down_proj`` runs at full width with original
+weights: no Nyström correction).
+
+Two families of criteria:
+
+- **router-only** (``router_prob`` | ``contribution`` | ``uniform`` |
+  ``coverage_alloc`` | ``pivchol_global``): the per-expert keep-count is decided
+  by ``allocate_budgets`` from the router weights alone, then applied in the
+  standard per-expert loop.
+- **cross-expert** (Level-2: ``oracle_mag`` | ``pubsub``): channels of all K
+  active experts compete on **one global scale** per token, so we materialize
+  each token's ``(K, I)`` intermediate, score it, and keep the global top-``B``.
 
 The block reads per-layer state attached at install time:
     self._dyn_ranks    (E, I) long   channel ranks by descending score
     self._dyn_contrib  (E,)   float   expert_out_token_contrib >= 0
     self._dyn_prefix   (E, I) float   descending-score prefix sums (coverage_alloc)
     self._dyn_gains    (E, I) float   pivoted-Cholesky marginal gains (pivchol_global)
+    self._dyn_beta     float          g^{2*beta} sharpness (pivchol_global; M4)
+    self._dyn_col_norm (E, I) float   ||W_down[:,j]|| per channel (oracle_mag)
+    self._dyn_pub_*    pubsub artifact tensors (pubsub)
     self._dyn_B        int             total kept channels per token
     self._dyn_k_min    int             per-expert floor
     self._dyn_I        int             per-expert cap (moe_intermediate_size)
-    self._dyn_criterion str            router_prob | contribution | uniform | coverage_alloc
+    self._dyn_criterion str            criterion name
 """
 
 import torch
 import torch.nn.functional as F
 
-from src.dynamic_active_param.allocate import allocate_budgets
+from src.dynamic_active_param.allocate import (
+    allocate_budgets,
+    select_global_topB,
+    _CROSS_EXPERT_CRITERIA,
+)
 
 __all__ = ["dynamic_moe_block_forward"]
+
+
+def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
+    """Level-2 cross-expert keep-mask: gather each token's (K,I) intermediate,
+    score all K*I channels on one scale, keep the global top-B.
+
+    Returns ``inter_all`` ``(T, K, I)`` and ``keep`` ``(T, K, I)`` bool, plus the
+    per-(token, slot) intermediate so the caller can apply the mask and run
+    ``down_proj`` in the standard per-expert scatter loop.
+    """
+    T, K = selected_experts.shape
+    I = self._dyn_I
+    device = hidden_states.device
+    dtype = hidden_states.dtype
+
+    # Materialize each token's K active-expert intermediates into (T, K, I).
+    inter_all = torch.zeros((T, K, I), dtype=dtype, device=device)
+    expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+    expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+    for expert_idx in expert_hit:
+        eid = int(expert_idx)
+        expert_layer = self.experts[eid]
+        idx, top_x = torch.where(expert_mask[eid].squeeze(0))  # idx in 0..K-1, token id
+        cur = hidden_states[top_x]
+        gate = expert_layer.gate_proj(cur)
+        up = expert_layer.up_proj(cur)
+        inter_all[top_x, idx] = (expert_layer.act_fn(gate) * up).to(dtype)
+
+    # Score all K*I channels on one per-token scale.
+    if self._dyn_criterion == "oracle_mag":
+        # exact per-token magnitude: g_e * |inter| * ||W_down[:,j]||.
+        col_norm = self._dyn_col_norm[selected_experts]        # (T, K, I)
+        g = routing_weights.to(torch.float32)                  # (T, K)
+        score = g.unsqueeze(-1) * inter_all.abs().float() * col_norm
+        keep = select_global_topB(score, self._dyn_B)
+        return inter_all, keep
+
+    # pubsub: private score g^2 * sigma_priv(channel), public carriers forced in.
+    g = routing_weights.to(torch.float32)                      # (T, K)
+    pivrank = self._dyn_pub_pivrank[selected_experts]          # (T, K, I) channel->rank
+    gains = self._dyn_pub_gains[selected_experts]              # (T, K, I) rank-ordered
+    sigma_chan = torch.gather(gains, 2, pivrank)               # (T, K, I) per physical channel
+    score = (g * g).unsqueeze(-1) * sigma_chan                 # (T, K, I) private
+
+    # Public: for each direction, force-keep the single best carrier among the
+    # token's K experts (dedup across experts). carrier_idx/val: (r, E).
+    cidx = self._dyn_pub_carrier_idx[:, selected_experts]      # (r, T, K) channel idx
+    cval = self._dyn_pub_carrier_val[:, selected_experts]      # (r, T, K) |coef|
+    r = cidx.shape[0]
+    if r > 0:
+        # best-carrying expert-slot per (dir, token).
+        best_slot = cval.argmax(dim=2)                         # (r, T) in 0..K-1
+        rr = torch.arange(r, device=device).unsqueeze(1)       # (r,1)
+        tt = torch.arange(T, device=device).unsqueeze(0)       # (1,T)
+        sel_chan = cidx[rr, tt, best_slot]                     # (r, T) channel idx
+        # scatter +inf into score[token, best_slot, sel_chan] to force-keep it.
+        flat_slot = best_slot.reshape(-1)                      # (r*T,)
+        flat_tok = tt.expand(r, T).reshape(-1)                 # (r*T,)
+        flat_chan = sel_chan.reshape(-1)                       # (r*T,)
+        score[flat_tok, flat_slot, flat_chan] = float("inf")
+
+    keep = select_global_topB(score, self._dyn_B)
+    return inter_all, keep
 
 
 def dynamic_moe_block_forward(self, hidden_states: torch.Tensor):
@@ -40,48 +120,67 @@ def dynamic_moe_block_forward(self, hidden_states: torch.Tensor):
     # cast back to the input dtype
     routing_weights = routing_weights.to(hidden_states.dtype)
 
-    # --- dynamic per-token per-expert channel budgets -----------------------
-    # (T, K) long: how many channels each token keeps in each of its K experts.
-    k_alloc = allocate_budgets(
-        routing_weights=routing_weights,
-        selected_experts=selected_experts,
-        contrib=self._dyn_contrib,
-        B=self._dyn_B,
-        k_min=self._dyn_k_min,
-        I=self._dyn_I,
-        criterion=self._dyn_criterion,
-        prefix_sums=getattr(self, "_dyn_prefix", None),
-        gains=getattr(self, "_dyn_gains", None),
-    )
-
     final_hidden_states = torch.zeros(
         (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
     )
 
-    expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
-    expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-    for expert_idx in expert_hit:
-        eid = int(expert_idx)
-        expert_layer = self.experts[eid]
-        idx, top_x = torch.where(expert_mask[eid].squeeze(0))
+    cross_expert = self._dyn_criterion in _CROSS_EXPERT_CRITERIA
+    if cross_expert:
+        # Level-2: global cross-expert selection needs each token's full (K,I)
+        # intermediate. Compute keep-mask once, then scatter down_proj per expert.
+        inter_all, keep = _cross_expert_keep(
+            self, hidden_states, routing_weights, selected_experts
+        )
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            eid = int(expert_idx)
+            expert_layer = self.experts[eid]
+            idx, top_x = torch.where(expert_mask[eid].squeeze(0))
+            inter = inter_all[top_x, idx]                       # (n_e, I)
+            inter = inter * keep[top_x, idx].to(inter.dtype)    # apply keep-mask
+            current_hidden_states = expert_layer.down_proj(inter)
+            current_hidden_states = current_hidden_states * routing_weights[top_x, idx, None]
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+    else:
+        # router-only per-expert budget.
+        k_alloc = allocate_budgets(
+            routing_weights=routing_weights,
+            selected_experts=selected_experts,
+            contrib=self._dyn_contrib,
+            B=self._dyn_B,
+            k_min=self._dyn_k_min,
+            I=self._dyn_I,
+            criterion=self._dyn_criterion,
+            prefix_sums=getattr(self, "_dyn_prefix", None),
+            gains=getattr(self, "_dyn_gains", None),
+            beta=getattr(self, "_dyn_beta", 1.0),
+        )
 
-        current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            eid = int(expert_idx)
+            expert_layer = self.experts[eid]
+            idx, top_x = torch.where(expert_mask[eid].squeeze(0))
 
-        # SwiGLU intermediate at full width, then zero the channels beyond each
-        # token's budget for this expert (keep the top k_{t,e} ranks).
-        gate = expert_layer.gate_proj(current_state)
-        up = expert_layer.up_proj(current_state)
-        inter = expert_layer.act_fn(gate) * up  # (n_e, I)
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
 
-        k_col = k_alloc[top_x, idx]                       # (n_e,) budget per token
-        rank_row = self._dyn_ranks[eid]                   # (I,)
-        keep = rank_row.unsqueeze(0) < k_col.unsqueeze(1)  # (n_e, I) bool
-        inter = inter * keep.to(inter.dtype)
+            # SwiGLU intermediate at full width, then zero the channels beyond each
+            # token's budget for this expert (keep the top k_{t,e} ranks).
+            gate = expert_layer.gate_proj(current_state)
+            up = expert_layer.up_proj(current_state)
+            inter = expert_layer.act_fn(gate) * up  # (n_e, I)
 
-        current_hidden_states = expert_layer.down_proj(inter)
-        current_hidden_states = current_hidden_states * routing_weights[top_x, idx, None]
+            k_col = k_alloc[top_x, idx]                       # (n_e,) budget per token
+            rank_row = self._dyn_ranks[eid]                   # (I,)
+            keep = rank_row.unsqueeze(0) < k_col.unsqueeze(1)  # (n_e, I) bool
+            inter = inter * keep.to(inter.dtype)
 
-        final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+            current_hidden_states = expert_layer.down_proj(inter)
+            current_hidden_states = current_hidden_states * routing_weights[top_x, idx, None]
+
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
 
     # Shared expert path (Qwen2-MoE); left untouched — it is not budget-pruned.
     if hasattr(self, "shared_expert") and self.shared_expert is not None:

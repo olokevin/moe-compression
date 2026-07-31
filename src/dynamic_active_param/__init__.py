@@ -8,12 +8,13 @@ exact accuracy at budget with no variable-width matmuls).
 See docs/results/dynamic_active_param/plan/plan_initial.md.
 """
 
-from src.dynamic_active_param.allocate import allocate_budgets
+from src.dynamic_active_param.allocate import allocate_budgets, select_global_topB
 from src.dynamic_active_param.precompute import AllocArtifact, build_alloc_artifact
 from src.dynamic_active_param.install import install_dynamic_alloc
 
 __all__ = [
     "allocate_budgets",
+    "select_global_topB",
     "AllocArtifact",
     "build_alloc_artifact",
     "install_dynamic_alloc",

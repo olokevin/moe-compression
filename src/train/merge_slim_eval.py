@@ -119,6 +119,44 @@ def main(args, model, tokenizer):
         criterion = dynamic_alloc_cfg.get("criterion", "router_prob")
         channel_metric = dynamic_alloc_cfg.get("channel_metric", "activation")
         k_min = dynamic_alloc_cfg.get("k_min", 16)
+        beta = dynamic_alloc_cfg.get("beta", 1.0)
+
+        # Level-2 cross-expert selectors: oracle_mag (exact per-token magnitude,
+        # needs only cached down_proj column norms, built inside install) and
+        # pubsub (offline shared-public-subspace artifact from covariances).
+        if criterion in ("oracle_mag", "pubsub"):
+            pubsub_artifact = None
+            if criterion == "pubsub":
+                import os as _os
+                from src.dynamic_active_param.pubsub import build_pubsub_artifact
+                r = dynamic_alloc_cfg.get("pub_r", 8)
+                lambda_r = dynamic_alloc_cfg.get("lambda_r", 1.0)
+                # pubsub needs covariances; collect once if absent.
+                if not _os.path.exists(_os.path.join(args.scores_dir, "expert_covariances.pth")):
+                    from src.calibration.channel_scoring.collect_covariance import (
+                        ensure_leverage_and_covariances,
+                    )
+                    ensure_leverage_and_covariances(
+                        model, tokenizer, args,
+                        lambda_ridge=args.prune_kwargs.get("lambda_ridge", 1.0),
+                        verbose=True,
+                    )
+                _print(f"\n[Step 3] Dynamic allocation (criterion=pubsub, r={r}, lambda_r={lambda_r})")
+                pubsub_artifact = build_pubsub_artifact(
+                    model, scores_dir=args.scores_dir, r=r, lambda_r=lambda_r,
+                    device=args.device, verbose=True,
+                )
+            else:
+                _print(f"\n[Step 3] Dynamic allocation (criterion=oracle_mag)")
+            model = install_dynamic_alloc(
+                model, artifact=None, prune_ratio=prune_ratio, criterion=criterion,
+                k_min=k_min, verbose=True, pubsub_artifact=pubsub_artifact,
+            )
+            _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
+            _print(f"\n[Step 6] Start evaluation...")
+            results = eval_dispatch(args, model, tokenizer, verbose=True)
+            _print(f"[Step 6] ✅ Evaluation results: {results}")
+            return
 
         # Level 1 — pivoted-Cholesky global g^2 selection: the artifact is built
         # from the model's down_proj weights + cached activation Gram (not from
@@ -146,6 +184,7 @@ def main(args, model, tokenizer):
                 criterion=criterion,
                 k_min=k_min,
                 verbose=True,
+                beta=beta,
             )
             _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
             total_params_after_slim = count_params(model)

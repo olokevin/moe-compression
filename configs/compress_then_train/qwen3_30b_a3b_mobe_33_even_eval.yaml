@@ -1,0 +1,52 @@
+# Phase 2 of the even-split 33% MoBE run: EVAL ONLY of the already-compressed
+# checkpoint produced by Phase 1 (qwen3_30b_a3b_mobe_33_even_fit_only.yaml).
+#
+# train_mode: full -> NO compression happens here; the model_name_or_path points
+# at the saved hf_reconstructed/ checkpoint (a standard HF model whose experts
+# are already the materialized MoBE-factorized gate/up/down weights). We then run
+# the standard benchmark (PPL wikitext2+c4 + HellaSwag 0-shot + MMLU 5-shot) via
+# eval_before_compression, sharded across the free GPUs.
+#
+# IMPORTANT: set model_name_or_path to the Phase-1 run's hf_reconstructed dir.
+#
+# Launch (multi-GPU shard) on A100-New:
+#   FORCE_DEVICE_MAP_AUTO=1 PER_GPU_MEM=36GiB ATTN_IMPLEMENTATION=sdpa \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   .venv/bin/python src/compress_then_train.py --config <this>
+
+model_name_or_path: outputs/compress_then_train/ce_mobe_calib-c4-0.67_1.0e-04-0723-015029/compressed_model/hf_reconstructed
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── No compression: just load the pre-compressed checkpoint and benchmark ─────
+train_mode: full
+compression_ratio: 0.67
+skip_layers: lm_head
+
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+# ── Benchmarking: PPL(wikitext2,c4) + hellaswag (0-shot) + mmlu (5-shot) ──────
+# eval_before_compression=true benchmarks the loaded (already-compressed) model.
+run_lm_eval: true
+eval_before_compression: true
+eval_after_compression: false
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1                # full tasks (HellaSwag 10042, MMLU 14042 x 57)
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048

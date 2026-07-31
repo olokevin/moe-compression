@@ -1,0 +1,68 @@
+# down_proj-ONLY MoBE @ 37.5% reduction, shared basis on the INPUT (intermediate
+# p) side. gate_proj/up_proj left DENSE. Phase 1: FIT + SAVE ONLY (no eval).
+#
+# down_proj is (out=d=2048, in=p=768). Input-side basis => fit down_proj directly:
+#   A_e (d, r), B (m, r, p),  gamma = (n*d*r + m*r*p) / (n*d*p)
+#   m=32, r=439 -> gamma = 0.6252 -> down_proj reduced 37.5%.
+# Only down_proj is compressed, so whole-MoE reduction ~= 37.5%/3 ~= 12.5%.
+#
+# Controlled counterpart of the output-side run (same m=32; only the basis axis
+# and rank differ: output r=768 spans d, input r=439 spans p, both -> 37.5%).
+#
+# Launch (single GPU, model on CPU):
+#   CUDA_VISIBLE_DEVICES=<g> MODEL_ON_CPU=1 ATTN_IMPLEMENTATION=sdpa \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   .venv/bin/python src/compress_then_train.py --config <this>
+
+model_name_or_path: Qwen/Qwen3-30B-A3B
+name_suffix: _downin375         # distinct run dir (avoid same-second collision)
+lr: 1.0e-4
+optimizer: adamw
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+batch_size: 1
+gradient_accumulation_steps: 1
+num_epochs: 1
+seed: 42
+
+no_wandb: true
+
+# ── MoBE decomposition (data-free), down_proj ONLY, input-side basis ──────────
+train_mode: mobe
+compression_ratio: 0.625
+moe_basis_count: 32              # m
+moe_basis_rank: 768              # gate/up rank (unused here; gate/up dense)
+moe_basis_rank_down: 439         # r_down spanning p -> gamma=0.6252 (37.5%)
+moe_compress_gate_up: false      # leave gate_proj/up_proj DENSE
+moe_compress_down: true
+moe_down_basis_side: input       # shared basis spans intermediate p (fit weight directly)
+moe_fit_iters: 2000
+moe_fit_lr: 0.07
+moe_fit_patience: 0
+moe_z_norm: true
+moe_fit_log_every: 500
+moe_save_native: true
+moe_save_hf_reconstructed: true
+
+calib_source: c4
+eval_ppl_after_compression: false   # DISABLED (model on CPU)
+eval_ppl_seqlen: 2048
+skip_layers: lm_head
+
+kd_loss_type: ce
+ce_data_source: c4
+ce_seq_len: 2048
+ce_steps: 1
+save_steps: none
+base_dir: outputs/compress_then_train
+one_shot_eval_only: true
+
+run_lm_eval: false
+eval_before_compression: false
+eval_after_compression: false
+eval_every_steps: 0
+lm_eval_tasks: hellaswag,mmlu
+lm_eval_limit: -1
+lm_eval_batch_size: 8
+lm_eval_max_seqlen: 2048
