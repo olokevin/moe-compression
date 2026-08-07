@@ -1,0 +1,45 @@
+# top-4 experts (reduce_topk) STACKED with oracle_up: two multiplicative
+# reductions of the per-token active expert FFN — fewer experts (8->4) AND
+# narrower experts (75% of the intermediate dim dropped per token).
+#
+# oracle_up ranks channels by the pre-gate g*|up|*||W_down|| (Q2), so the top-B decision
+# precedes gate_proj and the budget cuts gate_proj AND down_proj (up stays full).
+# Budget is measured against the REDUCED active path: B = 0.25 * K_new(4) * I(768)
+# = 768 of 3072. Whole-FFN active cut vs the dense top-8 model: 75.0%
+# (top-4 alone is -50.0%). Masking simulation, no fine-tuning. HellaSwag 0-shot.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.75
+  reduce_topk: 4
+  dynamic_alloc:
+    enabled: true
+    criterion: "oracle_up"
+    k_min: 0
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_30b_a3b_dynamic_topk4_oracle_up_75_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

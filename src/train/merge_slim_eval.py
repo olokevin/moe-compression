@@ -69,12 +69,22 @@ def main(args, model, tokenizer):
         _print(f"\n[Step 2] Skip LoRA merge (no resume_path)")
         total_params_after_merge = total_params_initial
     
-    # Reduce-top-k baseline: route each token to fewer experts (e.g. K/2)
-    # instead of narrowing experts. Halving top_k halves the activated
-    # expert-FFN params per token — the "fewer experts" counterpart to the
-    # dynamic "narrower experts" scheme, at the same active budget. No slimming;
-    # eval the original weights with a smaller routing top_k.
+    # Reduce-top-k: route each token to fewer experts (e.g. K/2) instead of
+    # narrowing experts. Halving top_k halves the activated expert-FFN params
+    # per token — the "fewer experts" counterpart to the dynamic "narrower
+    # experts" scheme. No slimming; eval the original weights with a smaller
+    # routing top_k.
+    #
+    # It composes with the dynamic path below: when dynamic_alloc is also
+    # enabled we only set top_k here and fall through, so the two reductions
+    # stack (fewer experts AND narrower experts). install_dynamic_alloc then
+    # reads the *reduced* K from the config, so the per-token budget
+    # B = (1 - prune_ratio) * K_new * I is measured against the already-halved
+    # active path.
     reduce_topk = args.prune_kwargs.get("reduce_topk", None)
+    dynamic_alloc_cfg = args.prune_kwargs.get("dynamic_alloc", {}) or {}
+    dynamic_enabled = prune_ratio > 0 and dynamic_alloc_cfg.get("enabled", False)
+
     if reduce_topk:
         from src.base.shared_utils.safe_isinstance import (
             _get_moe_block,
@@ -86,7 +96,7 @@ def main(args, model, tokenizer):
         orig_topk = _get_topk(model)
         new_topk = int(reduce_topk)
         _print(
-            f"\n[Step 3] Reduce-top-k baseline: routing top_k {orig_topk} -> {new_topk} "
+            f"\n[Step 3] Reduce-top-k: routing top_k {orig_topk} -> {new_topk} "
             f"(active expert-FFN params scaled by {new_topk / orig_topk:.3f})"
         )
         n_set = 0
@@ -102,18 +112,22 @@ def main(args, model, tokenizer):
             model.config.num_experts_per_tok = new_topk
         _print(f"[Step 4] ✅ Set top_k={new_topk} on {n_set} MoE blocks (no slimming)")
 
-        _print(f"\n[Step 6] Start evaluation...")
-        results = eval_dispatch(args, model, tokenizer, verbose=True)
-        _print(f"[Step 6] ✅ Evaluation results: {results}")
-        return
+        if not dynamic_enabled:
+            _print(f"\n[Step 6] Start evaluation...")
+            results = eval_dispatch(args, model, tokenizer, verbose=True)
+            _print(f"[Step 6] ✅ Evaluation results: {results}")
+            return
+        _print(
+            f"[Step 4] Stacking dynamic allocation on top of top_k={new_topk} "
+            f"(budget measured against the reduced active path)"
+        )
 
     # Dynamic per-token, per-expert active-parameter allocation (masking
     # simulation): distribute a fixed channel budget unevenly across each
     # token's top-K experts. Branches around the static mask-gen / real-slim
     # path entirely; real_slim stays false. See
     # docs/results/dynamic_active_param/plan/plan_initial.md.
-    dynamic_alloc_cfg = args.prune_kwargs.get("dynamic_alloc", {}) or {}
-    if prune_ratio > 0 and dynamic_alloc_cfg.get("enabled", False):
+    if dynamic_enabled:
         from src.dynamic_active_param import build_alloc_artifact, install_dynamic_alloc
 
         criterion = dynamic_alloc_cfg.get("criterion", "router_prob")
@@ -122,9 +136,11 @@ def main(args, model, tokenizer):
         beta = dynamic_alloc_cfg.get("beta", 1.0)
 
         # Level-2 cross-expert selectors: oracle_mag (exact per-token magnitude,
-        # needs only cached down_proj column norms, built inside install) and
-        # pubsub (offline shared-public-subspace artifact from covariances).
-        if criterion in ("oracle_mag", "pubsub"):
+        # needs only cached down_proj column norms, built inside install),
+        # oracle_mag_noW (Q1: oracle_mag without the ||W_down|| factor), oracle_up
+        # (Q2: rank by up_proj output, cut gate_proj+down_proj) and pubsub (offline
+        # shared-public-subspace artifact from covariances).
+        if criterion in ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub"):
             pubsub_artifact = None
             if criterion == "pubsub":
                 import os as _os
@@ -147,7 +163,7 @@ def main(args, model, tokenizer):
                     device=args.device, verbose=True,
                 )
             else:
-                _print(f"\n[Step 3] Dynamic allocation (criterion=oracle_mag)")
+                _print(f"\n[Step 3] Dynamic allocation (criterion={criterion})")
             model = install_dynamic_alloc(
                 model, artifact=None, prune_ratio=prune_ratio, criterion=criterion,
                 k_min=k_min, verbose=True, pubsub_artifact=pubsub_artifact,

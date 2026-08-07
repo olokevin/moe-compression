@@ -55,7 +55,7 @@ def install_dynamic_alloc(
     B = int(round((1.0 - prune_ratio) * K * I))
     # Cross-expert criteria emerge per-expert quotas from a global threshold, so
     # they impose no k_min floor (a dominated expert may get 0 channels).
-    cross_expert = criterion in ("oracle_mag", "pubsub")
+    cross_expert = criterion in ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub")
     if not cross_expert:
         B = max(K * k_min, min(B, K * I))  # keep feasible
     else:
@@ -107,8 +107,10 @@ def install_dynamic_alloc(
         )
         moe_block._dyn_beta = float(beta)
 
-        # oracle_mag: exact per-token magnitude needs the down_proj column norms.
-        if criterion == "oracle_mag":
+        # oracle_mag / oracle_up score by the exact per-token magnitude, which
+        # weights each channel by its down_proj column norm ||W_down[:, j]||.
+        # (oracle_mag_noW deliberately drops this factor — Q1 — so it needs none.)
+        if criterion in ("oracle_mag", "oracle_up"):
             cn = torch.stack(
                 [e.down_proj.weight.detach().float().norm(dim=0) for e in experts], dim=0
             )  # (E, I) = ||W_down[:, j]||_2 per expert/channel

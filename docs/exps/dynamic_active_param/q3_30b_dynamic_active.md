@@ -433,6 +433,288 @@ its rank), not more offline statistics. A uniform global budget B is already
 well-matched to depth, though early/late layers (peakier, more heterogeneous)
 are where a per-token budget would pay off most.
 
+## `oracle_mag` ablations — which factor carries the signal, and can we cut gate_proj too?
+
+Two questions about the `oracle_mag` score
+`s_{e,j}(x) = g_e·|inter_{e,j}(x)|·‖W_down[:,j]‖`, both at −75% and −87.5%, on
+HellaSwag (0-shot) and MMLU (5-shot). Masking simulation, no fine-tuning,
+`k_min = 0`, `real_slim: false` — same protocol as the `oracle_mag` rows above.
+
+- **Q1 `oracle_mag_noW`** — *does the weight term matter?* Rank and select by
+  `g_e·|inter_{e,j}(x)|` **only**, dropping the `‖W_down[:,j]‖` column-norm
+  factor. Like `oracle_mag`, it reduces `down_proj` alone.
+- **Q2 `oracle_up`** — *can the decision be made before `gate_proj` runs?* Score
+  by `g_e·|up_{e,j}(x)|·‖W_down[:,j]‖` — the **`up_proj` output**, which is
+  available before `gate_proj` — keep the global top-B, then compute `gate_proj`
+  **and** `down_proj` only on the kept channels (`up_proj` stays full width).
+
+### Reduction accounting — what the "75%" denominator is
+
+Worth stating explicitly, because it differs between the rows. `prune_ratio`
+sets `B = round((1−prune_ratio)·K·I)`, i.e. it always measures the **intermediate
+dimension** (equivalently, `down_proj`'s active columns). But which *matrices*
+that budget actually shrinks differs:
+
+| Method                              | ranking signal                            | up_proj | gate_proj | down_proj | full-FFN active kept |
+| ----------------------------------- | ----------------------------------------- | ------- | --------- | --------- | -------------------- |
+| `oracle_mag` / `oracle_mag_noW` | `\|inter\|` (needs gate **and** up) | full    | full      | ρ        | (1+1+ρ)/3           |
+| `oracle_up`                       | `\|up\|` (pre-gate)                       | full    | ρ        | ρ        | (1+2ρ)/3            |
+
+Because the masking simulation must evaluate the full SwiGLU intermediate before
+it can score channels, `oracle_mag` leaves `gate_proj` and `up_proj` at full
+width — so a nominal "−75%" is a −75% cut of `down_proj` only, and just
+**−25% of the whole expert FFN**. `oracle_up` moves the decision ahead of
+`gate_proj`, so the same B cuts two of the three matrices: **−50% whole-FFN** at
+the same nominal budget. At −87.5%: −29.2% vs **−58.3%** whole-FFN.
+So the two Q2 rows buy **2× the real active-param reduction** of the
+`oracle_mag` row they sit next to — they are not iso-compute comparisons at
+equal nominal ρ.
+
+### Results
+
+| Reduction (nominal) | Method                          | whole-FFN active cut | HellaSwag acc | HellaSwag acc_norm | MMLU acc (5-shot) |
+| ------------------- | ------------------------------- | -------------------- | ------------- | ------------------ | ----------------- |
+| −75%               | `oracle_mag` (ref)            | −25.0%              | 59.71         | 78.28              | 80.53             |
+| −75%               | **Q1 `oracle_mag_noW`** | −25.0%              | 59.77         | **78.36**    | **80.70**   |
+| −75%               | **Q2 `oracle_up`**      | **−50.0%**    | 57.81         | 75.31              | 79.47             |
+| −87.5%             | `oracle_mag` (ref)            | −29.2%              | 58.40         | 76.84              | 79.48             |
+| −87.5%             | **Q1 `oracle_mag_noW`** | −29.2%              | 58.60         | **77.11**    | **79.44**   |
+| −87.5%             | **Q2 `oracle_up`**      | **−58.3%**    | 54.51         | 71.30              | 76.43             |
+
+Dense baseline: HellaSwag 78.56 acc_norm; MMLU 5-shot ≈79.5. stderr ≈0.41–0.45pt
+on HellaSwag acc_norm, ≈0.32–0.34pt on MMLU acc. `oracle_mag` reference rows are
+the existing runs (re-read from their `lm_harness/*results.json`, matching the
+tables above), except `oracle_mag` MMLU@−87.5% (79.48), which was never run in
+the Level-2 sweep and was measured separately on 2026-08-01 to complete the row
+(`configs/eval/qwen3_30b_a3b_dynamic_oracle_mag_875_mmlu.yaml`). All twelve cells
+are therefore measured, not carried from prose.
+
+### Reads
+
+- **Q1: the `‖W_down[:,j]‖` factor is nearly irrelevant — the per-token
+  activation carries essentially all the signal.** Dropping it moves HellaSwag
+  acc_norm by **+0.08pt** (−75%) and **+0.27pt** (−87.5%), and MMLU acc by
+  **+0.17pt** (−75%) and **−0.04pt** (−87.5%) — all four deltas **well within 1
+  stderr**, i.e. statistically indistinguishable at both budgets and on both
+  benchmarks (MMLU@−87.5% is a dead heat: 79.44 vs 79.48). This
+  sharpens the M1 story: `oracle_mag`'s near-dense accuracy comes from reading
+  the true per-token `|inter_{e,j}(x)|`, **not** from any weight-geometry term.
+  Mechanically it makes sense — across channels within an expert the column norms
+  vary far less (and are static) than the per-token activations, so they rarely
+  flip a top-B decision. **Practical consequence:** a future online predictor
+  needs to predict only the *activation* magnitude (or its rank); it can ignore
+  `W_down` geometry entirely, which removes a per-expert `(I,)` table and makes
+  the target purely a function of the token.
+- **Q2: moving the decision before `gate_proj` doubles the real cut and costs
+  1–5.5pt.** `oracle_up` gives up **−2.97pt** (HellaSwag, −75%), **−5.54pt**
+  (HellaSwag, −87.5%), **−1.06pt** (MMLU, −75%) and **−3.05pt** (MMLU, −87.5%)
+  versus `oracle_mag` at the
+  same nominal ρ — while cutting **twice** the active parameters. Judged at
+  *equal whole-FFN reduction* the trade is clearly favourable: `oracle_up` at
+  −50% whole-FFN scores 75.31, whereas reaching −50% whole-FFN in the
+  `oracle_mag` family would need ρ far below 0.125 (its −87.5% row only reaches
+  −29.2%). Still 3.3pt below dense at −50% whole-FFN with **no fine-tuning**.
+- **Why `|up|` is a weaker ranker than `|inter|`, and why the gap widens.** The
+  SwiGLU output is `SiLU(gate_j)·up_j`; ranking by `|up_j|` alone discards the
+  gate, which is precisely the multiplicative term that decides whether a channel
+  is switched on for this token. The penalty grows as budget tightens on **both**
+  benchmarks (HellaSwag −2.97 → −5.54pt; MMLU −1.06 → −3.05pt) because at small B
+  the selection must be far more precise, and a channel with large `|up_j|` but a
+  near-zero `SiLU(gate_j)` wastes budget. MMLU degrades roughly half as fast as
+  HellaSwag at each budget, consistent with 5-shot MMLU tolerating capacity loss
+  better — but the *trend* is the same, so the widening gap is a property of the
+  `|up|` proxy, not of one benchmark.
+- **Net direction for the method.** Q1 says the *only* thing worth predicting is
+  the per-token activation magnitude; Q2 says a **pre-gate** proxy for it is
+  already good enough to double the realized compute saving at a 3pt cost. That
+  is an encouraging sign for a practical (non-oracle) Level-2 predictor: it does
+  not need `W_down`, and it can be positioned before `gate_proj` — but a raw
+  `|up_j|` proxy leaves ~3–6pt on the table, so a predictor that approximates
+  `SiLU(gate_j)·up_j` (rather than `up_j`) is where the remaining headroom is.
+
+## Stacking both reductions — top-4 experts × narrower experts
+
+The two ways to shrink the per-token active expert FFN have so far been studied
+as *alternatives* (see "Fewer experts > narrower experts at 50%" above). They are
+orthogonal, so this section **composes** them: route each token to **top-4 of 8**
+experts (`reduce_topk: 4`, −50% on its own) *and* narrow each surviving expert
+with the Q1/Q2 winners from the ablation above. If they compose cleanly, the
+reductions multiply and reach whole-FFN cuts (−58% to −75%) that neither knob
+reaches alone.
+
+Both criteria are re-used unchanged — the best-per-signal ablation results:
+`oracle_mag_noW` (Q1: rank by `g_e·|inter_{e,j}(x)|`, no `‖W_down‖` factor;
+statistically tied with full `oracle_mag` while needing no weight statistics) and
+`oracle_up` (Q2: rank by the pre-gate `g_e·|up_{e,j}(x)|·‖W_down[:,j]‖`, so the
+budget also cuts `gate_proj`). Masking simulation, no fine-tuning, `k_min = 0`,
+`real_slim: false`. HellaSwag 0-shot and full MMLU 5-shot.
+
+**Implementation.** `reduce_topk` previously short-circuited to eval; it now
+falls through when `dynamic_alloc.enabled` is also set, so the two stack
+(`src/train/merge_slim_eval.py`). Order matters and is: set `top_k` on all 48 MoE
+blocks *first*, then install the dynamic forward — `install_dynamic_alloc` reads
+`K` from `model.config.num_experts_per_tok`, which the reduce-top-k step has
+already lowered to 4. So the per-token budget is measured against the
+**already-halved** active path:
+
+    B = round((1 − prune_ratio) · K_new · I) = (1 − prune_ratio) · 4 · 768
+
+Verified on the box: `Reduce-top-k: routing top_k 8 -> 4` then
+`[DynamicAlloc] ... K=4, I=768, prune_ratio=0.75, B=768 (of K*I=3072)`.
+Unit tests for the stacked path (budget conservation against `K_new·I`, and
+ρ=1 reproducing plain reduce-top-k exactly) are in
+`src/dynamic_active_param/tests/test_level2.py`.
+
+### Reduction accounting — the nominal % is *not* the whole-FFN cut
+
+Two compoundings make the denominators worth spelling out. `prune_ratio` measures
+the intermediate dimension of the **reduced** path, and (as in the Q1/Q2 section)
+which *matrices* it shrinks depends on the criterion. Writing ρ = 1 − prune_ratio
+and taking the dense top-8 model (3 matrices × K=8 × I) as the denominator:
+
+| Method                     | up_proj      | gate_proj    | down_proj  | full-FFN active kept   |
+| -------------------------- | ------------ | ------------ | ---------- | ---------------------- |
+| `oracle_mag_noW` @ top-4 | full (×4/8) | full (×4/8) | ρ (×4/8) | `4·(1+1+ρ)/(8·3)` |
+| `oracle_up` @ top-4      | full (×4/8) | ρ (×4/8)   | ρ (×4/8) | `4·(1+2ρ)/(8·3)`  |
+
+| Config                           | nominal | B (of 3072) | whole-FFN active cut |
+| -------------------------------- | ------- | ----------- | -------------------- |
+| top-4 alone (`reduce_topk: 4`) | —      | 3072        | **−50.0%**    |
+| top-4 ×`oracle_mag_noW`       | −50%   | 1536        | **−58.3%**    |
+| top-4 ×`oracle_mag_noW`       | −75%   | 768         | **−62.5%**    |
+| top-4 ×`oracle_up`            | −50%   | 1536        | **−66.7%**    |
+| top-4 ×`oracle_up`            | −75%   | 768         | **−75.0%**    |
+
+Note how compressed the `oracle_mag_noW` range is (−58.3% → −62.5% for a 2× budget
+change): with `gate_proj` and `up_proj` both at full width, two of the three
+matrices are untouched, so ρ moves only 1/3 of the FFN. `oracle_up` cuts two of
+three and spans −66.7% → −75.0%. **The rows are therefore not iso-compute across
+criteria** — compare `oracle_up` @ −50% (−66.7% whole-FFN) against
+`oracle_mag_noW` @ −75% (−62.5%) for the closest pairing.
+
+### Results
+
+All 12 cells measured. The 8 stacked runs are `scripts/run_topk4_stack_sweep.sh`
+(A100-New, 4 waves × 2 jobs × 4 GPUs, 2026-08-03→04, all rc 0, `ALL_WAVES_DONE`);
+the plain top-4 MMLU reference row is `qwen3_30b_a3b_reduce_topk4_mmlu.yaml`
+(A100-Sagemaker, **77.40** — its log contains non-fatal `CUDACachingAllocator`
+OOM-retry warnings, but the run completed and saved results).
+
+| Method                                | nominal | whole-FFN active cut | HellaSwag acc | HellaSwag acc_norm | MMLU acc (5-shot) |
+| ------------------------------------- | ------- | -------------------- | ------------- | ------------------ | ----------------- |
+| Dense baseline (top-8, unpruned)      | —      | —                   | —            | 78.56              | ≈79.5            |
+| top-4 only (`reduce_topk: 4`)       | —      | −50.0%              | 57.42         | 75.96              | 77.40             |
+| top-8 ×`oracle_mag_noW` (ref)      | −75%   | −25.0%              | 59.77         | 78.36              | 80.70             |
+| top-8 ×`oracle_mag_noW` (ref)      | −87.5% | −29.2%              | 58.60         | 77.11              | 79.44             |
+| top-8 ×`oracle_up` (ref)           | −75%   | −50.0%              | 57.81         | 75.31              | 79.47             |
+| top-8 ×`oracle_up` (ref)           | −87.5% | −58.3%              | 54.51         | 71.30              | 76.43             |
+| **top-4 × `oracle_mag_noW`** | −50%   | **−58.3%**    | 57.28         | **75.67**    | **77.30**   |
+| **top-4 × `oracle_mag_noW`** | −75%   | **−62.5%**    | 56.79         | **75.14**    | **76.58**   |
+| **top-4 × `oracle_up`**      | −50%   | **−66.7%**    | 56.36         | **74.02**    | **77.18**   |
+| **top-4 × `oracle_up`**      | −75%   | **−75.0%**    | 53.42         | **69.99**    | **74.31**   |
+
+The four `top-8 ×` reference rows are the Q1/Q2 rows from the ablation table above
+(re-read from their `lm_harness/*results.json`); the `top-4 only` HellaSwag number
+is the existing reduce-top-k run. stderr on the new rows: 0.43 / 0.43 / 0.44 /
+0.46pt on acc_norm.
+
+### Reads (HellaSwag)
+
+- **Stacking works, and it dominates narrowing-only at equal compute.** The one
+  exactly iso-compute pair in the table is at **−58.3% whole-FFN**: stacking
+  (top-4 × `oracle_mag_noW` −50%) scores **75.67** versus **71.30** for pure
+  narrowing (top-8 × `oracle_up` −87.5%) — **+4.37pt**, ~10× stderr. Even the
+  *deeper* stacked cut (top-4 × `oracle_mag_noW` −75%, **−62.5%**) beats that
+  −58.3% narrowing-only point by **+3.84pt** while removing 4.2pp more of the FFN.
+  Reaching a given active budget by *halving the expert count first and narrowing
+  the survivors moderately* is clearly better than narrowing all 8 experts hard.
+- **The first ~12pp of narrowing on top of top-4 is nearly free.** Going top-4 →
+  top-4 × `oracle_mag_noW` −50% costs **−0.29pt** (75.96 → 75.67, well inside 1
+  stderr) for an extra 8.3pp of whole-FFN cut; pushing to −75% nominal costs only
+  **−0.82pt** total for 12.5pp. Consistent with the Q1 finding that per-token
+  `|inter|` ranking is near-lossless at moderate ρ — it stays near-lossless after
+  the expert count is halved, i.e. the two reductions are close to independent
+  rather than compounding their damage.
+- **`oracle_up`'s pre-gate penalty compounds under stacking.** At top-8 the
+  `noW → up` gap at −75% nominal was −3.05pt (78.36 → 75.31); at top-4 the same
+  nominal comparison costs −1.65pt (−50%: 75.67 → 74.02) and −5.15pt (−75%: 75.14
+  → 69.99). Judged on whole-FFN cut instead, `oracle_up` still extends the frontier
+  where `oracle_mag_noW` cannot reach (−66.7% at 74.02 and −75.0% at 69.99, versus
+  `oracle_mag_noW`'s floor of −62.5%) — so the `|up|` proxy remains the only way to
+  claim `gate_proj`, just at a widening price as budget tightens.
+- **Frontier summary** (acc_norm vs whole-FFN active cut, dense 78.56): −50.0%
+  → 75.96 (top-4 only) · −58.3% → 75.67 · −62.5% → 75.14 · −66.7% → 74.02 ·
+  −75.0% → 69.99. Accuracy holds within ~3.4pt of dense out to a **−62.5%** active
+  cut with no fine-tuning, then falls off sharply once `gate_proj` is also cut at
+  the tightest budget.
+
+### Reads (MMLU)
+
+MMLU is far more forgiving of stacking than HellaSwag, and — up to a point — it
+reshuffles the criterion ranking:
+
+- **Narrowing on top of top-4 is nearly free out to −62.5% whole-FFN.** Versus
+  the plain top-4 baseline (77.40), the three cheaper stacked rows cost
+  **−0.10pt** (`noW` −50%, **77.30**), **−0.22pt** (`up` −50%, **77.18**) and
+  **−0.82pt** (`noW` −75%, **76.58**). The first two are well inside 1 stderr
+  (0.34pt), so 8.3–16.7pp of extra whole-FFN cut is statistically free on top of
+  the halved expert count. Same shape as HellaSwag, where the corresponding costs
+  were −0.29 / −1.94 / −0.82pt.
+- **The `|up|` pre-gate penalty is budget-dependent — free at −50%, expensive at
+  −75%.** At nominal −50% the two criteria are a dead heat (`noW` 77.30 vs `up`
+  77.18, **+0.12pt**), so the cheaper-to-realize `oracle_up` — which also cuts
+  `gate_proj`, reaching −66.7% whole-FFN — costs nothing. At nominal −75% the gap
+  opens to **+2.27pt** (76.58 vs 74.31). This is the same widening-with-tightening
+  -budget behaviour as the top-8 Q2 rows, just shifted: halving the expert count
+  buys one budget step of tolerance for the proxy before it starts to hurt.
+- **The cliff is `oracle_up` past −66.7%.** Going `up` −50% → −75% (−66.7% →
+  −75.0% whole-FFN) costs **−2.87pt** on MMLU (77.18 → 74.31), versus −0.72pt for
+  the corresponding `noW` step. HellaSwag showed the same cliff more violently
+  (−4.03pt, 74.02 → 69.99). So "narrowing on top of top-4 is free" holds only
+  through ≈−66.7%; cutting `gate_proj` at ρ=0.25 on half the experts is where both
+  benchmarks break.
+- **The iso-compute win holds on MMLU but is much smaller.** At −58.3% whole-FFN:
+  stacking (`top-4 × noW` −50%, **77.30**) vs pure narrowing (`top-8 × up` −87.5%,
+  **76.43**) = **+0.87pt** (~2.6 stderr), against HellaSwag's +4.37pt. And the
+  deeper stacked cut (−62.5%, **76.58**) still edges that −58.3% narrowing-only
+  point by **+0.15pt** — a tie within noise, where HellaSwag showed +3.84pt.
+  Consistent with the rest of this document: 5-shot MMLU tolerates lost expert
+  capacity far better than 0-shot HellaSwag, so the two routes to a given budget
+  look similar here and **the choice between them should be made on the harder
+  benchmark.**
+- **Best whole-FFN cut at ≈dense accuracy:** `oracle_up` @ top-4 −50% holds
+  **77.18** (2.3pt below the ≈79.5 dense 5-shot reference) at a **−66.7%** active
+  expert-FFN cut, and `oracle_mag_noW` @ −75% holds **76.58** (−2.9pt) at −62.5%,
+  both with no fine-tuning.
+
+### Frontier summary (both benchmarks)
+
+acc_norm / acc vs whole-FFN active cut, both from the halved-K path unless noted:
+
+| whole-FFN cut    | config                | HellaSwag acc_norm | MMLU acc |
+| ---------------- | --------------------- | ------------------ | -------- |
+| — (dense top-8) | —                    | 78.56              | ≈79.5   |
+| −50.0%          | top-4 only            | 75.96              | 77.40    |
+| −58.3%          | top-4 ×`noW` −50% | 75.67              | 77.30    |
+| −62.5%          | top-4 ×`noW` −75% | 75.14              | 76.58    |
+| −66.7%          | top-4 ×`up` −50%  | 74.02              | 77.18    |
+| −75.0%          | top-4 ×`up` −75%  | 69.99              | 74.31    |
+
+**Bottom line.** Accuracy holds within ~3.4pt (HellaSwag) / ~2.9pt (MMLU) of dense
+out to a **−62.5%** active expert-FFN cut with **no fine-tuning**, and −66.7% is
+reachable at ~2.3pt on MMLU. Reaching a target budget by *halving the expert count
+first, then narrowing the survivors moderately* beats narrowing all 8 experts hard
+at equal compute — decisively on HellaSwag (+4.4pt at −58.3%), marginally on MMLU
+(+0.9pt). Both benchmarks break at the same place: cutting `gate_proj` at ρ=0.25 on
+top of top-4 (−75.0%).
+
+**Caveat on the oracle status.** These are still oracle selectors — they read the
+true per-token `|inter_{e,j}(x)|` (or `|up_{e,j}(x)|`) — so the numbers are a
+*ceiling* for a practical method, not a deployable result. What stacking
+establishes is that the ceiling stays high when the expert count is halved first,
+which makes "top-k reduction + a cheap online width predictor" the more promising
+target than pushing width alone.
+
 ## Configs
 
 33% study:
@@ -457,6 +739,25 @@ baseline `configs/eval/qwen3_30b_a3b_dynamic_prob_act_{625,75,875}_hellaswag.yam
 `configs/eval/qwen3_30b_a3b_dynamic_{pivchol,prob_act}_75_mmlu.yaml`. Sweep
 orchestrator (2 jobs/wave, 4 GPUs each): `scripts/run_level1_sweep.sh`.
 
+Q1/Q2 `oracle_mag` ablations (8 configs):
+`configs/eval/qwen3_30b_a3b_dynamic_{oracle_mag_noW,oracle_up}_{75,875}_{hellaswag,mmlu}.yaml`.
+Each: `criterion: oracle_mag_noW` | `oracle_up`, `k_min: 0`, `real_slim: false`,
+no artifact needed (`oracle_mag_noW` uses no offline statistics at all;
+`oracle_up` only needs the `down_proj` column norms, built inline in
+`install_dynamic_alloc`). Orchestrator (4 waves × 2 jobs × 4 GPUs):
+`scripts/run_oracle_q1q2_sweep.sh`. Missing reference row filled by
+`configs/eval/qwen3_30b_a3b_dynamic_oracle_mag_875_mmlu.yaml`.
+
+top-4 stacking study (8 configs):
+`configs/eval/qwen3_30b_a3b_dynamic_topk4_{oracle_mag_noW,oracle_up}_{50,75}_{hellaswag,mmlu}.yaml`.
+Each combines `reduce_topk: 4` with `dynamic_alloc.enabled: true`,
+`criterion: oracle_mag_noW` | `oracle_up`, `k_min: 0`, `real_slim: false`, and
+`prune_ratio: 0.50` | `0.75` measured against the reduced `K_new = 4`. No
+artifacts needed. Orchestrator (4 waves × 2 jobs × 4 GPUs):
+`scripts/run_topk4_stack_sweep.sh`. The plain top-4 MMLU reference row is
+`configs/eval/qwen3_30b_a3b_reduce_topk4_mmlu.yaml` (independent, so run in
+parallel on the second box rather than as a fifth wave).
+
 ## Notes
 
 - `expert_out_token_contrib` is a per-expert *scalar* (calibration-averaged),
@@ -465,6 +766,21 @@ orchestrator (2 jobs/wave, 4 GPUs each): `scripts/run_level1_sweep.sh`.
   is the truly per-token criterion.
 - Implementation: `src/dynamic_active_param/` (allocate / precompute / block /
   install), unit-tested in `src/dynamic_active_param/tests/`.
+- `oracle_mag_noW` / `oracle_up` are registered in `_CROSS_EXPERT_CRITERIA`
+  (`allocate.py`) and scored in `block._cross_expert_keep`; `oracle_up`
+  additionally materializes the per-token `(K, I)` `up_proj` activation, since its
+  ranking signal is the pre-gate `|up_{e,j}(x)|`. `install.py` builds
+  `_dyn_col_norm` for `{oracle_mag, oracle_up}` only. Both are masking
+  simulations: the kept-channel arithmetic is identical to zeroing the non-kept
+  intermediate before `down_proj`, so the reported accuracy is exact at budget —
+  what changes between them is *which* channels are kept and *which matrices*
+  the budget is claimed against (see the accounting table above).
+- `reduce_topk` **composes** with `dynamic_alloc` (it used to short-circuit to
+  eval). When both are set, `merge_slim_eval.py` lowers `top_k` on every MoE
+  block *and* `model.config.num_experts_per_tok`, then falls through to install
+  the dynamic forward — which reads the reduced `K`, so `B` is derived from
+  `K_new · I`, not the original `K · I`. `reduce_topk` alone still behaves
+  exactly as before.
 - `coverage_alloc` adds `prefix_sums (L,E,I)` to the artifact (cache bumped to
   `dynamic_alloc_<metric>_v2.pth`) and a vectorized, token-chunked per-token
   binary search over α in `allocate._coverage_allocate`. Only the

@@ -32,7 +32,12 @@ _VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "
 # forward (they need the actual per-token intermediate activations / a public
 # basis, which allocate_budgets never sees), so they are handled by
 # ``select_global_topB`` rather than ``allocate_budgets``.
-_CROSS_EXPERT_CRITERIA = ("oracle_mag", "pubsub")
+#   oracle_mag      : g * |inter| * ||W_down[:,j]||        (reduces down_proj)
+#   oracle_mag_noW  : g * |inter|                          (Q1: drop the W_down factor)
+#   oracle_up       : g * |up|    * ||W_down[:,j]||        (Q2: rank by up_proj output;
+#                                                           reduces gate_proj + down_proj)
+#   pubsub          : offline public-subspace private score
+_CROSS_EXPERT_CRITERIA = ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub")
 
 
 def select_global_topB(score: torch.Tensor, B: int, chunk: int = 4096) -> torch.Tensor:

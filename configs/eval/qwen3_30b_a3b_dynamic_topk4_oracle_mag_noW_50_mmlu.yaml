@@ -1,0 +1,46 @@
+# top-4 experts (reduce_topk) STACKED with oracle_mag_noW: two multiplicative
+# reductions of the per-token active expert FFN — fewer experts (8->4) AND
+# narrower experts (50% of the intermediate dim dropped per token).
+#
+# oracle_mag_noW ranks channels by the exact per-token g*|inter| (no ||W_down|| factor, Q1),
+# so the decision needs the full SwiGLU intermediate: gate_proj and up_proj stay
+# full width and the budget cuts down_proj alone.
+# Budget is measured against the REDUCED active path: B = 0.50 * K_new(4) * I(768)
+# = 1536 of 3072. Whole-FFN active cut vs the dense top-8 model: 58.3%
+# (top-4 alone is -50.0%). Masking simulation, no fine-tuning. MMLU 5-shot.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 8
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.5
+  reduce_topk: 4
+  dynamic_alloc:
+    enabled: true
+    criterion: "oracle_mag_noW"
+    k_min: 0
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_30b_a3b_dynamic_topk4_oracle_mag_noW_50_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

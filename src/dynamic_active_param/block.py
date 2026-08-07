@@ -14,9 +14,13 @@ Two families of criteria:
   ``coverage_alloc`` | ``pivchol_global``): the per-expert keep-count is decided
   by ``allocate_budgets`` from the router weights alone, then applied in the
   standard per-expert loop.
-- **cross-expert** (Level-2: ``oracle_mag`` | ``pubsub``): channels of all K
-  active experts compete on **one global scale** per token, so we materialize
-  each token's ``(K, I)`` intermediate, score it, and keep the global top-``B``.
+- **cross-expert** (Level-2: ``oracle_mag`` | ``oracle_mag_noW`` | ``oracle_up``
+  | ``pubsub``): channels of all K active experts compete on **one global scale**
+  per token, so we materialize each token's ``(K, I)`` intermediate, score it,
+  and keep the global top-``B``. ``oracle_mag_noW`` drops the ``||W_down||``
+  factor from ``oracle_mag`` (Q1); ``oracle_up`` ranks by the ``up_proj`` output
+  instead of the SwiGLU intermediate, so the top-B decision precedes ``gate_proj``
+  and both ``gate_proj`` + ``down_proj`` are cut to budget (Q2).
 
 The block reads per-layer state attached at install time:
     self._dyn_ranks    (E, I) long   channel ranks by descending score
@@ -57,8 +61,14 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
     device = hidden_states.device
     dtype = hidden_states.dtype
 
+    # oracle_up (Q2) ranks channels by the up_proj output magnitude alone (the
+    # signal computable before gate_proj), so it needs each token's (K, I) up
+    # activation in addition to the SwiGLU intermediate that feeds down_proj.
+    need_up = self._dyn_criterion == "oracle_up"
+
     # Materialize each token's K active-expert intermediates into (T, K, I).
     inter_all = torch.zeros((T, K, I), dtype=dtype, device=device)
+    up_all = torch.zeros((T, K, I), dtype=dtype, device=device) if need_up else None
     expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
     expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
     for expert_idx in expert_hit:
@@ -69,13 +79,29 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
         gate = expert_layer.gate_proj(cur)
         up = expert_layer.up_proj(cur)
         inter_all[top_x, idx] = (expert_layer.act_fn(gate) * up).to(dtype)
+        if need_up:
+            up_all[top_x, idx] = up.to(dtype)
 
     # Score all K*I channels on one per-token scale.
-    if self._dyn_criterion == "oracle_mag":
-        # exact per-token magnitude: g_e * |inter| * ||W_down[:,j]||.
-        col_norm = self._dyn_col_norm[selected_experts]        # (T, K, I)
+    if self._dyn_criterion in ("oracle_mag", "oracle_mag_noW"):
+        # exact per-token magnitude of the down_proj input:
+        #   oracle_mag     : g_e * |inter| * ||W_down[:,j]||  (full formula)
+        #   oracle_mag_noW : g_e * |inter|                    (Q1: drop col-norm)
         g = routing_weights.to(torch.float32)                  # (T, K)
-        score = g.unsqueeze(-1) * inter_all.abs().float() * col_norm
+        score = g.unsqueeze(-1) * inter_all.abs().float()
+        if self._dyn_criterion == "oracle_mag":
+            score = score * self._dyn_col_norm[selected_experts]  # (T, K, I)
+        keep = select_global_topB(score, self._dyn_B)
+        return inter_all, keep
+
+    if self._dyn_criterion == "oracle_up":
+        # Q2: rank by the up_proj output magnitude (decided before gate_proj), so
+        # keeping the global top-B lets gate_proj AND down_proj be computed only on
+        # the kept channels. In the masking sim the output is identical to zeroing
+        # the non-kept intermediate before down_proj, but the realized active-param
+        # cut now covers gate_proj too (2x the reduction of oracle_mag at same B).
+        g = routing_weights.to(torch.float32)                  # (T, K)
+        score = g.unsqueeze(-1) * up_all.abs().float() * self._dyn_col_norm[selected_experts]
         keep = select_global_topB(score, self._dyn_B)
         return inter_all, keep
 

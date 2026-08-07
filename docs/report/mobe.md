@@ -1,3 +1,5 @@
+use c
+
 # Week 6 — MoBE (Mixture-of-Basis-Experts) Factorization
 
 Model throughout: **Qwen3-30B-A3B** (hidden `d=2048`, MoE intermediate `p=768`, 128 experts/layer, top-8, 48 layers). All numbers below are **one-shot** (compress → eval, **no recovery fine-tuning**). HellaSwag = 0-shot acc_norm, MMLU = 5-shot acc.
