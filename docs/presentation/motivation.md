@@ -21,7 +21,7 @@ Four measurements build to that claim:
    output magnitude sits in a small tail of channels.
 2. **That subset is token-specific** — which channels matter is re-decided every
    token, so no fixed within-expert keep-set works.
-3. **Acting on it holds near-dense accuracy at scale** — per-token selection on
+3. **Acting on it holds near-dense accuracy at scale** — per-token selection on 
    the full dense Qwen3-30B-A3B stays at the dense line out to a 70% cut and
    degrades gracefully past it.
 4. **Online beats offline decisively** — the per-token selector stays near dense
@@ -44,9 +44,9 @@ directly measures how much dropping that channel costs.
 Profiling a single expert (layer 0, expert 0) over 8,000 WikiText-2 tokens, the
 distribution of `h_j` is sharply long-tailed: **43% of activations are ~0**
 (`|h| < 0.003`), and the bulk of the mass sits inside a narrow band while a thin
-tail carries the rest. Deactivating the bottom 95% by `|h|` (blue) leaves only the
-surviving tail (amber) — a small fraction of channel-firings does essentially all
-the work.
+tail carries the rest. Deactivating the bottom 80% by `|h|` (grey) leaves only the
+large-magnitude tail (blue) — a small fraction of channel-firings does essentially
+all the work.
 
 **Takeaway.** Most of an expert's intermediate channels are idle for any given
 token; the output can be reconstructed from a sparse subset.
@@ -60,14 +60,14 @@ token; the output can be reconstructed from a sparse subset.
 ![No channel is always on or always off — the kept set is token-specific](figs/fig_token_specific.png)
 
 Same expert. Each token routed to it keeps its own **top-25%** channels (ρ = 0.25);
-the curve plots, for each of the expert's 768 neurons, the fraction of those tokens
-that keep it (sorted descending).
+the curve plots, for each of the expert's 768 neurons (in natural index order), the
+fraction of those tokens that keep it.
 
-If a *fixed* within-expert keep-set worked, this curve would be a step: a 25% slice
-pinned at 100% and the rest at 0%. Instead it is smooth and clusters at the budget
-line ρ = 25%: **0% of channels are kept >95% of the time** and only **0.1% are kept
-<5% of the time**. Every channel is sometimes in, sometimes out — the keep decision
-is genuinely re-made per token.
+If a *fixed* within-expert keep-set worked, 25% of the neurons would pin at 100% and
+the rest at 0%. Instead almost every neuron hovers around the budget line ρ = 25%:
+**0% of channels are kept >95% of the time** and only **0.1% are kept <5% of the
+time**. Every channel is sometimes in, sometimes out — the keep decision is
+genuinely re-made per token.
 
 **Takeaway.** There is no small, stable "load-bearing" channel set to prune once.
 The redundancy is real but *per-token*, so it can only be harvested by an online,
@@ -82,21 +82,20 @@ lights up.
 **Per-token channel selection on the full dense Qwen3-30B-A3B — near-dense
 accuracy with no fine-tuning.**
 
-![Per-token channel selection holds near-dense accuracy across the prune-ratio sweep](figs/fig_mobe_prune_sweep.png)
+| MMLU (5-shot acc)                                                           | HellaSwag (0-shot acc_norm)                                                              |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| ![Per-token selection holds near-dense MMLU](figs/fig_prune_sweep_mmlu.png) | ![Per-token selection holds near-dense HellaSwag](figs/fig_prune_sweep_hellaswag.png)r  |
 
 We install the per-token selector on the untouched dense model (`reduce = gate+down`,
 `up_proj` full width to produce the ranking signal) and sweep the nominal reduction
 of the active intermediate dimension from 50% to 90%. Both curves are exact at
-budget (masking simulation, no training).
+budget (masking simulation, no training), each with its dashed dense reference.
 
 - **MMLU (5-shot) is essentially flat to a 70% cut** — 79.3 / 79.5 / 79.2 vs the
   dense 79.6, i.e. within noise — then falls off only past 80% (77.9 at 80%, 74.1
   at 90%).
 - **HellaSwag (0-shot acc_norm)** tracks the same shape: ~77.7 out to 70%, holding
   the near-dense line, with the knee at 80–90%.
-
-The dashed lines mark the dense references (MMLU 79.6; the HellaSwag reference is
-the arc-era baseline, see note below).
 
 **Takeaway.** The per-token structure from slides 1–2 is not a curiosity of one
 expert: acting on it across all 48 layers of the real 30B model buys a large
@@ -154,8 +153,8 @@ must select **online, per token, at channel granularity.**
 
 ## Data provenance
 
-| Figure | Source |
-|---|---|
-| `fig_sparse_suffices` / `fig_token_specific` | `docs/results/presentation/expert_activation.npz` (from `scripts/expert_activation_capture.py`); plotted by `scripts/expert_activation_plot.py`. Numbers in `figs/stats_activation.json`. |
-| `fig_mobe_prune_sweep` | `test/results/mobe/mobe_30b.md` §"Results — dense Qwen3-30B-A3B, prune-ratio sweep" (5 greenland jobs, 2026-08-07). |
-| `fig_offline_vs_online` | `docs/exps/dynamic_active_param/q3_30b_dynamic_active.md` (Level-1 sweep + Level-2 `oracle_mag`) and `docs/report/level2.md`. |
+| Figure                                                   | Source                                                                                                                                                                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fig_sparse_suffices` / `fig_token_specific`         | `docs/results/presentation/expert_activation.npz` (from `scripts/expert_activation_capture.py`); plotted by `scripts/expert_activation_plot.py`. Numbers in `figs/stats_activation.json`. |
+| `fig_prune_sweep_mmlu` / `fig_prune_sweep_hellaswag` | `test/results/mobe/mobe_30b.md` §"Results — dense Qwen3-30B-A3B, prune-ratio sweep" (5 greenland jobs, 2026-08-07).                                                                           |
+| `fig_offline_vs_online`                                | `docs/exps/dynamic_active_param/q3_30b_dynamic_active.md` (Level-1 sweep + Level-2 `oracle_mag`) and `docs/report/level2.md`.                                                               |

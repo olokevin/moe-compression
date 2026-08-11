@@ -27,26 +27,27 @@ Four figures back the motivation slides:
 
 Single panel (linear y-axis): histogram of one expert's SwiGLU output
 `h_j = SiLU(gate_j·x)·(up_j·x)` over 8,000 WikiText-2 tokens (layer 0, expert 0),
-with the bottom 95% by `|h|` shaded blue (deactivated) and the surviving tail
-amber. 43% of activations are ~0. From `scripts/expert_activation_plot.py`; numbers
-in `stats_activation.json`.
+with the bottom 80% by `|h|` shaded grey (deactivated) and the large-magnitude tail
+blue (activated). 43% of activations are ~0. From `scripts/expert_activation_plot.py`;
+numbers in `stats_activation.json`.
 
 ### `fig_token_specific` — motivation slide 2
 
 Single panel (y-axis a 0–100% keep-ratio): per-neuron keep-frequency for **one**
-expert. Each token keeps its own top-25% channels (ρ = 0.25); the curve (sorted
-desc) is smooth and clusters at ρ, not a step — 0% of channels are kept >95% of
-the time, 0.1% <5%. Establishes: no fixed within-expert keep-set works.
+expert, neurons in natural index order (unsorted). Each token keeps its own top-25%
+channels (ρ = 0.25); almost every neuron hovers around ρ, not a step — 0% of
+channels are kept >95% of the time, 0.1% <5%. Establishes: no fixed within-expert
+keep-set works.
 
-### `fig_mobe_prune_sweep` — motivation slide 3
+### `fig_prune_sweep_mmlu` / `fig_prune_sweep_hellaswag` — motivation slide 3
 
-MMLU (5-shot acc) and HellaSwag (0-shot acc_norm) vs nominal reduction (50–90%) of
-the active intermediate dimension, per-token selection on the **dense**
-Qwen3-30B-A3B (`reduce = gate+down`, no fine-tuning). Dashed dense references.
-Source: `test/results/mobe/mobe_30b.md` §"Results — dense Qwen3-30B-A3B,
-prune-ratio sweep". **Caveat:** the dense HellaSwag dashed line uses the arc-era
-baseline (0.6971) because the base-A3B HellaSwag eval crashed — it is a placeholder,
-not a measured dense HellaSwag.
+MMLU (5-shot acc) and HellaSwag (0-shot acc_norm), **one metric per figure**, vs
+nominal reduction (50–90%) of the active intermediate dimension, per-token selection
+on the **dense** Qwen3-30B-A3B (`reduce = gate+down`, no fine-tuning). y-axis starts
+at 50; each has its dashed dense reference. Source: `test/results/mobe/mobe_30b.md`
+§"Results — dense Qwen3-30B-A3B, prune-ratio sweep". **Caveat:** the dense HellaSwag
+dashed line uses the arc-era baseline (0.6971) because the base-A3B HellaSwag eval
+crashed — it is a placeholder, not a measured dense HellaSwag.
 
 ### `fig_offline_vs_online` — motivation slide 4
 
@@ -54,8 +55,9 @@ HellaSwag 0-shot acc_norm vs active-param reduction (50/62.5/75/87.5%), on
 `Qwen3-30B-A3B-Thinking-2507` (dense = 78.56). Two black offline curves
 (reduce-top-k dashed, Level-1 pivoted-Cholesky solid) vs one blue online curve
 (per-token `oracle_mag`). Source: `docs/exps/dynamic_active_param/q3_30b_dynamic_active.md`
-and `docs/report/level2.md`. Both `fig_mobe_prune_sweep` and this figure are from
-`scripts/presentation_motivation_plot.py` (numbers hard-coded from the result docs).
+and `docs/report/level2.md`. This figure and the two prune-sweep figures above are
+all from `scripts/presentation_motivation_plot.py` (numbers hard-coded from the
+result docs).
 
 ## Measured figures
 

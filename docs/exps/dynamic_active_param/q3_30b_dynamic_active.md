@@ -213,6 +213,42 @@ destroying expert capacity, so the baseline's redundant-channel double-spend and
 low-g over-feeding cost it more; Level 1's redundancy-aware global selection holds
 up. This corroborates the HellaSwag trend on a second, harder benchmark.
 
+### MMLU (5-shot) — Level 1 budget sweep
+
+Level 1 (`pivchol_global`) across all four active-param reductions, full MMLU
+5-shot (reuses the budget-agnostic `pivchol_artifact.pth`; only `prune_ratio`
+changes). The 50/62.5/87.5% rows were run on 2026-08-10
+(`configs/eval/qwen3_30b_a3b_dynamic_pivchol_{50,625,875}_mmlu.yaml`, A100-New);
+75% is carried from the table above. Overall acc, dense 5-shot MMLU **80.91**
+(measured 2026-08-11, full MMLU, `configs/eval/qwen3_30b_a3b_baseline_mmlu_full.yaml`,
+A100-Sagemaker; stderr 0.32pt):
+
+| Reduction | ρ (kept) | B (of 6144) | Level 1 MMLU acc (5-shot) | Δ vs dense (80.91) | HellaSwag acc_norm (ref) |
+| --------- | --------- | ----------- | ------------------------- | -------------------- | ------------------------ |
+| 50%       | 0.50      | 3072        | **78.85%**          | −2.06               | 74.26                    |
+| 62.5%     | 0.375     | 2304        | **76.16%**          | −4.75               | 70.54                    |
+| 75%       | 0.25      | 1536        | 70.81%                    | −10.10              | 63.60                    |
+| 87.5%     | 0.125     | 768         | **45.51%**          | −35.40              | 44.15                    |
+
+stderr on the new MMLU rows: 0.33 / 0.34 / — / 0.41pt on acc. HellaSwag acc_norm
+column carried from the budget-sweep table above.
+
+**Takeaways.**
+
+- **At 50% Level 1 is nearly lossless on MMLU** — 78.85% is within 2.1pt of
+  the dense 5-shot reference (80.91), at half the active expert-FFN budget with no
+  fine-tuning. 62.5% still holds within 4.8pt.
+- **MMLU degrades far more gracefully than HellaSwag until the tightest budget.**
+  From 50%→75% Level 1 loses 8.0pt on MMLU (78.85→70.81) but 10.7pt on HellaSwag
+  acc_norm (74.26→63.60) — consistent with the rest of this document: 5-shot MMLU
+  tolerates lost expert capacity better, since the few-shot context props up
+  knowledge recall even when the per-token FFN is heavily narrowed.
+- **Both benchmarks fall off a cliff at 87.5%.** MMLU drops 25.3pt from 75%→87.5%
+  (70.81→45.51, well above the 25% random floor but no longer usable), tracking
+  HellaSwag's collapse (63.60→44.15) at the same ρ=0.125. Keeping only 1/8 of each
+  active expert's channels is past the point where redundancy-aware ordering can
+  compensate, on either benchmark.
+
 ## Level 2 — cross-expert selection (`oracle_mag`, `pubsub`)
 
 Level 1's scoring matrix `Θ_k` is **block-diagonal**: channels are ranked
@@ -242,12 +278,13 @@ costs and whether a cross-expert method recovers it. Realizes
 Level-1 and reduce-top-k rows carried from the sweep table above. `oracle_mag`
 and `pubsub` are new (masking simulation, no fine-tuning).
 
-| Reduction | reduce top-k | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) |
-| --------- | ------------ | ----------------- | --------------- | ------------------------ |
-| 50%       | 75.2 (8→4)  | 74.26             | 74.31           | **78.54**          |
-| 62.5%     | 69.8 (8→3)  | 70.54             | 70.51           | **78.76**          |
-| 75%       | 49.4 (8→2)  | 63.60             | 63.46           | **78.28**          |
-| 87.5%     | 26.2 (8→1)  | 44.15             | 44.66           | **76.84**          |
+| Reduction | reduce top-k | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) | real cut | real score |
+| --------- | ------------ | ----------------- | --------------- | ------------------------ | -------- | ---------- |
+| 50%       | 75.2 (8→4)  | 74.26             | 74.31           | **78.54**          | -32.6%   | 77.76      |
+| 62.5%     | 69.8 (8→3)  | 70.54             | 70.51           | **78.76**          | -39.17%  | 77.62      |
+| 75%       | 49.4 (8→2)  | 63.60             | 63.46           | **78.28**          | -45.69%  | 77.34      |
+| 87.5%     | 26.2 (8→1)  | 44.15             | 44.66           | **76.84**          | -52.22%  | 72/58      |
+|           |              |                   |                 |                          | -58.75%  | 70.92      |
 
 Dense baseline 78.56. stderr ≈ 0.41–0.44pt on acc_norm.
 
@@ -271,15 +308,21 @@ Dense baseline 78.56. stderr ≈ 0.41–0.44pt on acc_norm.
   per-token intermediate), but it relocates the Level-2 target — the gap to close
   is online per-token, not offline cross-expert.
 
-### MMLU 5-shot @ 75% reduction (acc)
+### MMLU 5-shot (acc)
 
-| Method | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) |
-| ------ | ----------------- | --------------- | ------------------------ |
-| −75%  | 70.81             | 71.03           | **80.53**          |
+Dense: 80.91
+
+| Channel cut | reduce k | Level 1 (pivchol) | `pubsub` (L2) | `oracle_mag` (ceiling) | real cut | real score |
+| ----------- | -------- | ----------------- | --------------- | ------------------------ | -------- | ---------- |
+| -50%        | 74.1     | 78.85             |                 | 80.22                    | -32.6%   | 79.33      |
+| -62.5%      | 65.1     | 76.16             |                 | **80.89**          | -39.17%  | 79.50      |
+| −75%       | 34.9     | 70.81             | 71.03           | **80.53**          | -45.69%  | 79.15      |
+| -87.5%      | 24.4     | 45.51             |                 | 79.48                    | -52.22%  | 77.85      |
+| -95%        |          |                   |                 | **76.16**          | -58.75%  | 74.14      |
 
 Same pattern on the harder, knowledge-heavy benchmark: `pubsub` matches Level-1
-(+0.22pt), while `oracle_mag` recovers to **80.53** — essentially the full model
-(dense 5-shot MMLU is ~79.5) at a 75% active cut, +9.7pt over Level-1. Per-token
+(+0.22pt), while `oracle_mag` recovers to **80.53** — within 0.4pt of the full
+model (dense 5-shot MMLU is 80.91) at a 75% active cut, +9.7pt over Level-1. Per-token
 activation information matters *more* on MMLU, consistent with its sensitivity to
 destroyed expert capacity.
 
@@ -481,7 +524,7 @@ equal nominal ρ.
 | −87.5%             | **Q1 `oracle_mag_noW`** | −29.2%              | 58.60         | **77.11**    | **79.44**   |
 | −87.5%             | **Q2 `oracle_up`**      | **−58.3%**    | 54.51         | 71.30              | 76.43             |
 
-Dense baseline: HellaSwag 78.56 acc_norm; MMLU 5-shot ≈79.5. stderr ≈0.41–0.45pt
+Dense baseline: HellaSwag 78.56 acc_norm; MMLU 5-shot 80.91. stderr ≈0.41–0.45pt
 on HellaSwag acc_norm, ≈0.32–0.34pt on MMLU acc. `oracle_mag` reference rows are
 the existing runs (re-read from their `lm_harness/*results.json`, matching the
 tables above), except `oracle_mag` MMLU@−87.5% (79.48), which was never run in
@@ -602,7 +645,7 @@ OOM-retry warnings, but the run completed and saved results).
 
 | Method                                | nominal | whole-FFN active cut | HellaSwag acc | HellaSwag acc_norm | MMLU acc (5-shot) |
 | ------------------------------------- | ------- | -------------------- | ------------- | ------------------ | ----------------- |
-| Dense baseline (top-8, unpruned)      | —      | —                   | —            | 78.56              | ≈79.5            |
+| Dense baseline (top-8, unpruned)      | —      | —                   | —            | 78.56              | 80.91            |
 | top-4 only (`reduce_topk: 4`)       | —      | −50.0%              | 57.42         | 75.96              | 77.40             |
 | top-8 ×`oracle_mag_noW` (ref)      | −75%   | −25.0%              | 59.77         | 78.36              | 80.70             |
 | top-8 ×`oracle_mag_noW` (ref)      | −87.5% | −29.2%              | 58.60         | 77.11              | 79.44             |
@@ -683,8 +726,8 @@ reshuffles the criterion ranking:
   look similar here and **the choice between them should be made on the harder
   benchmark.**
 - **Best whole-FFN cut at ≈dense accuracy:** `oracle_up` @ top-4 −50% holds
-  **77.18** (2.3pt below the ≈79.5 dense 5-shot reference) at a **−66.7%** active
-  expert-FFN cut, and `oracle_mag_noW` @ −75% holds **76.58** (−2.9pt) at −62.5%,
+  **77.18** (3.7pt below the 80.91 dense 5-shot reference) at a **−66.7%** active
+  expert-FFN cut, and `oracle_mag_noW` @ −75% holds **76.58** (−4.3pt) at −62.5%,
   both with no fine-tuning.
 
 ### Frontier summary (both benchmarks)
@@ -693,16 +736,16 @@ acc_norm / acc vs whole-FFN active cut, both from the halved-K path unless noted
 
 | whole-FFN cut    | config                | HellaSwag acc_norm | MMLU acc |
 | ---------------- | --------------------- | ------------------ | -------- |
-| — (dense top-8) | —                    | 78.56              | ≈79.5   |
+| — (dense top-8) | —                    | 78.56              | 80.91   |
 | −50.0%          | top-4 only            | 75.96              | 77.40    |
 | −58.3%          | top-4 ×`noW` −50% | 75.67              | 77.30    |
 | −62.5%          | top-4 ×`noW` −75% | 75.14              | 76.58    |
 | −66.7%          | top-4 ×`up` −50%  | 74.02              | 77.18    |
 | −75.0%          | top-4 ×`up` −75%  | 69.99              | 74.31    |
 
-**Bottom line.** Accuracy holds within ~3.4pt (HellaSwag) / ~2.9pt (MMLU) of dense
+**Bottom line.** Accuracy holds within ~3.4pt (HellaSwag) / ~4.3pt (MMLU) of dense
 out to a **−62.5%** active expert-FFN cut with **no fine-tuning**, and −66.7% is
-reachable at ~2.3pt on MMLU. Reaching a target budget by *halving the expert count
+reachable at ~3.7pt on MMLU. Reaching a target budget by *halving the expert count
 first, then narrowing the survivors moderately* beats narrowing all 8 experts hard
 at equal compute — decisively on HellaSwag (+4.4pt at −58.3%), marginally on MMLU
 (+0.9pt). Both benchmarks break at the same place: cutting `gate_proj` at ρ=0.25 on
@@ -736,7 +779,10 @@ Budget sweep (HellaSwag): Level 1
 `configs/eval/qwen3_30b_a3b_dynamic_pivchol_{625,75,875}_hellaswag.yaml` and
 baseline `configs/eval/qwen3_30b_a3b_dynamic_prob_act_{625,75,875}_hellaswag.yaml`
 (reuse the cached artifacts; only `prune_ratio` changes). MMLU (5-shot):
-`configs/eval/qwen3_30b_a3b_dynamic_{pivchol,prob_act}_75_mmlu.yaml`. Sweep
+`configs/eval/qwen3_30b_a3b_dynamic_{pivchol,prob_act}_75_mmlu.yaml`, plus the
+Level-1 MMLU budget sweep `configs/eval/qwen3_30b_a3b_dynamic_pivchol_{50,625,875}_mmlu.yaml`
+(same, only `prune_ratio` changes; run via `scripts/run_pivchol_mmlu_sweep_tail.sh`
+which waits on the 50% job then reuses its GPUs for 87.5%). Sweep
 orchestrator (2 jobs/wave, 4 GPUs each): `scripts/run_level1_sweep.sh`.
 
 Q1/Q2 `oracle_mag` ablations (8 configs):

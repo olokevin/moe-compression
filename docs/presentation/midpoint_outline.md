@@ -53,9 +53,7 @@ note that our current best formulation uses full gate_proj, and partial activate
 - the gate_proj it self can undergoes low-rank compression to further boost efficiency
 - a channel expert predictor to pre-fetch the activated parameters in the next layer → no waiting
 
-[generate a figure]
-
-### Details of design
+etails of design
 
 - gate_proj as channel router
   - predict what channel experts to activate for each token

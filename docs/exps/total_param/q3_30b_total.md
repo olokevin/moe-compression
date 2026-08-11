@@ -26,12 +26,12 @@ in that method's section.
 
 ## Model
 
-| Property                      | Value                                                                                                                                                                              |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Architecture                  | Qwen3-30B-A3B — hidden`d=2048`, MoE intermediate `p=768`, `n=128` experts, top-k 8, 48 layers, SwiGLU/SiLU, no shared expert                                                |
-| Pruning base checkpoint       | `Qwen/Qwen3-30B-A3B-Thinking-2507` (bf16)                                                                                                                                        |
-| Factorization base checkpoint | `Qwen/Qwen3-30B-A3B` (bf16)                                                                                                                                                      |
-| Hardware                      | A100-New / A100-Sagemaker, 40 GB A100s (`FORCE_DEVICE_MAP_AUTO=1 PER_GPU_MEM=36GiB ATTN_IMPLEMENTATION=sdpa PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`)                    |
+| Property                      | Value                                                                                                                                                            |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Architecture                  | Qwen3-30B-A3B — hidden`d=2048`, MoE intermediate `p=768`, `n=128` experts, top-k 8, 48 layers, SwiGLU/SiLU, no shared expert                              |
+| Pruning base checkpoint       | `Qwen/Qwen3-30B-A3B-Thinking-2507` (bf16)                                                                                                                      |
+| Factorization base checkpoint | `Qwen/Qwen3-30B-A3B` (bf16)                                                                                                                                    |
+| Hardware                      | A100-New / A100-Sagemaker, 40 GB A100s (`FORCE_DEVICE_MAP_AUTO=1 PER_GPU_MEM=36GiB ATTN_IMPLEMENTATION=sdpa PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`) |
 
 **Eval protocol (all methods).** HellaSwag full 10 042 items, `num_fewshot=0` (report acc_norm);
 MMLU full 14 042 questions × 57 subtasks, `num_fewshot=5` (acc). Each task in its own lm-eval call.
@@ -50,7 +50,7 @@ follow. All rows one-shot, no recovery.
 | ---- | -------------------------------------------- | --------- | --------------------------------- | ------------------ | ------------------------ | -------------- | ------------- |
 | —   | Original (Thinking-2507)                     | —        | 0%                                | 78.56              | —                       | —             | Thinking-2507 |
 | —   | Original (Qwen3-30B-A3B)                     | —        | 0%                                | 77.68              | 82.0†                   | 8.70 / 14.05   | A3B           |
-| 🥇   | Leverage ranking + Nyström                   | prune     | −23.74% overall (25% expert-FFN) | **78.45**    | **76.04** (±0.34) | —             | Thinking-2507 |
+| 🥇   | Leverage ranking + Nyström                  | prune     | −23.74% overall (25% expert-FFN) | **78.45**    | **76.04** (±0.34) | —             | Thinking-2507 |
 | 🥈   | Activation-magnitude + plain slicing         | prune     | 25% expert-FFN                    | 78.23              | 76.28                    | —             | Thinking-2507 |
 | 🥉   | MoBE (`m=32`, `r=768`, gate/up only)     | factorize | −25% MoE-layer                   | 73.67              | 77.23                    | 9.59 / 15.98   | A3B           |
 | 4    | RFID-MoE (`m=32`, `ξ=0.8`, no residual) | factorize | −28.4% MoE-layer‡               | 66.80              | 71.32                    | 12.68 / 21.49  | A3B           |
@@ -67,17 +67,17 @@ checkpoint and un-rerun MMLU baseline — do not read it as MoBE > pruning witho
 
 ## Leaderboard @ ~33% reduction
 
-| Rank | Method                                                                | Family    | Reduction                         | HellaSwag acc_norm | MMLU (5-shot)            | PPL wiki2 / c4 | Base ckpt     |
-| ---- | --------------------------------------------------------------------- | --------- | --------------------------------- | ------------------ | ------------------------ | -------------- | ------------- |
-| —   | Original (Thinking-2507)                                              | —        | 0%                                | 78.56              | 81.73                    | 7.29 / 12.46   | Thinking-2507 |
-| —   | Original (Qwen3-30B-A3B)                                              | —        | 0%                                | 77.68              | 82.0†                   | 8.70 / 14.05   | A3B           |
-| 🥇   | Attribution-guided (leverage + Nyström)                              | prune     | −31.33% overall (33% expert-FFN) | **78.40**    | 73.00 (±0.35)           | —             | Thinking-2507 |
-| 🥈   | MoBE even-split (`m=38`, gate/up/down all factorized)      | factorize | −32.8% MoE-layer                 | 73.13              | **76.83**          | 10.10 / 16.57  | A3B           |
-| 🥉   | MoBE (`m=16`, `r=768`, gate/up only, down dense)          | factorize | −33.3% MoE-layer                 | 69.64              | 74.05                    | 11.75 / 20.32  | A3B           |
-| 4    | Nyström-MoE fix1 (`k=512`, self-target, 1500 it)              | factorize | 33% expert-FFN                    | 66.24              | 60.70                    | 12.97 / 17.69  | Thinking-2507 |
-| 5    | Nyström-MoE fix1+2 (`k=512`, teacher-traj, 1500 it)          | factorize | 33% expert-FFN                    | 65.97              | 61.24                    | 12.97 / 17.75  | Thinking-2507 |
-| —   | Nyström-MoE (self-target, 800 it — under-trained)                  | factorize | 33% expert-FFN                    | 65.46              | 60.92                    | 13.46 / 17.98  | Thinking-2507 |
-| ✗   | Uniform (`uniform`+`uniform`) — ablation                        | prune     | −31.28% overall (33% expert-FFN) | 65.10 (±0.48)     | 27.40 (±0.38)           | —             | Thinking-2507 |
+| Rank | Method                                                  | Family    | Reduction                         | HellaSwag acc_norm | MMLU (5-shot)   | PPL wiki2 / c4 | Base ckpt     |
+| ---- | ------------------------------------------------------- | --------- | --------------------------------- | ------------------ | --------------- | -------------- | ------------- |
+| —   | Original (Thinking-2507)                                | —        | 0%                                | 78.56              | 81.73           | 7.29 / 12.46   | Thinking-2507 |
+| —   | Original (Qwen3-30B-A3B)                                | —        | 0%                                | 77.68              | 82.0†          | 8.70 / 14.05   | A3B           |
+| 🥇   | Attribution-guided (leverage + Nyström)                | prune     | −31.33% overall (33% expert-FFN) | **78.40**    | 73.00 (±0.35)  | —             | Thinking-2507 |
+| 🥈   | MoBE even-split (`m=38`, gate/up/down all factorized) | factorize | −32.8% MoE-layer                 | 73.13              | **76.83** | 10.10 / 16.57  | A3B           |
+| 🥉   | MoBE (`m=16`, `r=768`, gate/up only, down dense)    | factorize | −33.3% MoE-layer                 | 69.64              | 74.05           | 11.75 / 20.32  | A3B           |
+| 4    | Nyström-MoE fix1 (`k=512`, self-target, 1500 it)     | factorize | 33% expert-FFN                    | 66.24              | 60.70           | 12.97 / 17.69  | Thinking-2507 |
+| 5    | Nyström-MoE fix1+2 (`k=512`, teacher-traj, 1500 it)  | factorize | 33% expert-FFN                    | 65.97              | 61.24           | 12.97 / 17.75  | Thinking-2507 |
+| —   | Nyström-MoE (self-target, 800 it — under-trained)     | factorize | 33% expert-FFN                    | 65.46              | 60.92           | 13.46 / 17.98  | Thinking-2507 |
+| ✗   | Uniform (`uniform`+`uniform`) — ablation           | prune     | −31.28% overall (33% expert-FFN) | 65.10 (±0.48)     | 27.40 (±0.38)  | —             | Thinking-2507 |
 
 **Takeaway @ 33%.** Attribution-guided leverage+Nyström pruning stays far ahead on HellaSwag (78.40,
 −0.16 vs unpruned) at a modest MMLU cost (73.00). The **MoBE even-split** (`m=38`, gate/up/**and** down
@@ -95,10 +95,10 @@ Down-only ablation (gate/up dense, so whole-MoE reduction ≈12.5%) isolating **
 sits when factorizing `down_proj`**. Both `m=32`, γ=0.625 on `down_proj`; detail + analysis in the
 MoBE section.
 
-| Basis side  | down_proj reduction | rank `r` | HellaSwag acc_norm | MMLU (5-shot) | PPL wiki2 / c4 |
-| ----------- | ------------------- | -------- | ------------------ | ------------- | -------------- |
-| Output-side | 37.5%               | 768      | **76.27**    | **78.33** | **9.42 / 14.99** |
-| Input-side  | 37.5%               | 439      | 74.09              | 77.30         | 11.10 / 17.18  |
+| Basis side  | down_proj reduction | rank`r` | HellaSwag acc_norm | MMLU (5-shot)   | PPL wiki2 / c4         |
+| ----------- | ------------------- | --------- | ------------------ | --------------- | ---------------------- |
+| Output-side | 37.5%               | 768       | **76.27**    | **78.33** | **9.42 / 14.99** |
+| Input-side  | 37.5%               | 439       | 74.09              | 77.30           | 11.10 / 17.18          |
 
 **Output-side wins on every metric** (+2.2 pt HellaSwag, +1.0 pt MMLU, lower PPL) — the shared basis
 should span the larger hidden axis `d=2048`, not the intermediate axis `p=768`.
@@ -124,19 +124,19 @@ c4 forward on the full un-slimmed model (~17 min on 4×40GB A100), cached into `
 
 **Results.**
 
-| Setting | Reduction | HellaSwag | MMLU (5-shot) |
-| ------- | --------- | --------- | ------------- |
+| Setting        | Reduction        | HellaSwag       | MMLU (5-shot)            |
+| -------------- | ---------------- | --------------- | ------------------------ |
 | 25% expert-FFN | −23.74% overall | **78.45** | **76.04** (±0.34) |
 | 33% expert-FFN | −31.33% overall | **78.40** | **73.00** (±0.35) |
 
 MMLU by category @ 33%:
 
-| Category | Attribution-guided 33% | Uniform 33% (ablation) |
-| -------- | ---------------------- | ---------------------- |
-| Humanities | 66.23 | 25.87 |
-| Social sciences | 84.47 | 28.66 |
-| STEM | 65.87 | 27.18 |
-| Other | 79.14 | 28.71 |
+| Category        | Attribution-guided 33% | Uniform 33% (ablation) |
+| --------------- | ---------------------- | ---------------------- |
+| Humanities      | 66.23                  | 25.87                  |
+| Social sciences | 84.47                  | 28.66                  |
+| STEM            | 65.87                  | 27.18                  |
+| Other           | 79.14                  | 28.71                  |
 
 **Analysis.** Near-lossless on HellaSwag at both budgets (−0.11 / −0.16 vs the 78.56 unpruned
 Thinking-2507 baseline); MMLU costs ~0 pt at 25% and ~3 pt at 33%. This is the strongest method overall
@@ -191,10 +191,10 @@ router, attention, norms, embeddings left dense. Input-side shared basis `B ∈ 
 The **two ratios** (the crux): stored per compressed (layer,type) = `A` (`n·p·r`) + `B` (`m·r·d`) +
 `α` (`n·m`, negligible); original = `n·p·d`. With `r=p=768`:
 
-| `m`  | γ on **up+gate** (compressed) | γ over **whole MoE layer** (incl. dense down), (2·γ_ug+1)/3 | Config |
-| ------ | ----------------------------- | ---------------------------------------------------------- | ------ |
-| **32** | 0.625 → −37.5% on up+gate    | 0.750 → **−25.0%** whole-MoE                              | `qwen3_30b_a3b_mobe.yaml` |
-| **16** | 0.500 → −50.0% on up+gate    | 0.667 → **−33.3%** whole-MoE                              | `qwen3_30b_a3b_mobe_33.yaml` |
+| `m`        | γ on**up+gate** (compressed) | γ over**whole MoE layer** (incl. dense down), (2·γ_ug+1)/3 | Config                         |
+| ------------ | ----------------------------------- | ------------------------------------------------------------------- | ------------------------------ |
+| **32** | 0.625 → −37.5% on up+gate         | 0.750 →**−25.0%** whole-MoE                                 | `qwen3_30b_a3b_mobe.yaml`    |
+| **16** | 0.500 → −50.0% on up+gate         | 0.667 →**−33.3%** whole-MoE                                 | `qwen3_30b_a3b_mobe_33.yaml` |
 
 The headline "25% / 33.3%" is the **whole-MoE** figure (denominator = all three expert matrices; the
 touched matrices are cut harder). `m=16` realized `stored/orig = 9.66e9/1.93e10 = 0.5000` exactly. Note
@@ -205,11 +205,11 @@ the pruning rows use. Fit converged uniformly `rel_err 0.97→0.33` (`m=32`) / `
 
 **Results.**
 
-| Setting | Whole-MoE reduction | up+gate reduction | HellaSwag | ΔHS | MMLU | wiki2 / c4 PPL |
-| ------- | ------------------- | ----------------- | --------- | --- | ---- | -------------- |
-| Baseline | — | — | 77.68 | — | 82.0 | 8.70 / 14.05 |
-| MoBE `m=32` | −25.0% | −37.5% | **73.67** | −4.01 | **77.23** | 9.59 / 15.98 |
-| MoBE `m=16` | −33.3% | −50.0% | **69.64** | −8.04 | **74.05** | 11.75 / 20.32 |
+| Setting      | Whole-MoE reduction | up+gate reduction | HellaSwag       | ΔHS   | MMLU            | wiki2 / c4 PPL |
+| ------------ | ------------------- | ----------------- | --------------- | ------ | --------------- | -------------- |
+| Baseline     | —                  | —                | 77.68           | —     | 82.0            | 8.70 / 14.05   |
+| MoBE`m=32` | −25.0%             | −37.5%           | **73.67** | −4.01 | **77.23** | 9.59 / 15.98   |
+| MoBE`m=16` | −33.3%             | −50.0%           | **69.64** | −8.04 | **74.05** | 11.75 / 20.32  |
 
 **Analysis.** Going `m=32→m=16` (25%→33.3%) costs ~4 extra pts on both tasks and pushes c4 PPL
 15.98→20.32. The 33% `m=16` run is the weak point: concentrating the whole cut on up+gate forces them to
@@ -233,10 +233,10 @@ sharded across 8 GPUs. Config `qwen3_30b_a3b_mobe_33_even.yaml`. Run date 2026-0
 
 **Results.**
 
-| Setting | Whole-MoE reduction | per-matrix γ | HellaSwag | MMLU | wiki2 / c4 PPL |
-| ------- | ------------------- | ------------ | --------- | ---- | -------------- |
-| MoBE even-split `m=38` | −32.8% | 0.672 (gate=up=down) | **73.13** | **76.83** | 10.10 / 16.57 |
-| (vs) classic `m=16`, down dense | −33.3% | up+gate 0.5, down 1.0 | 69.64 | 74.05 | 11.75 / 20.32 |
+| Setting                          | Whole-MoE reduction | per-matrix γ         | HellaSwag       | MMLU            | wiki2 / c4 PPL |
+| -------------------------------- | ------------------- | --------------------- | --------------- | --------------- | -------------- |
+| MoBE even-split`m=38`          | −32.8%             | 0.672 (gate=up=down)  | **73.13** | **76.83** | 10.10 / 16.57  |
+| (vs) classic`m=16`, down dense | −33.3%             | up+gate 0.5, down 1.0 | 69.64           | 74.05           | 11.75 / 20.32  |
 
 **Analysis.** **+3.5 pt HellaSwag / +2.8 pt MMLU over the classic down-dense `m=16` at the same overall
 reduction**, and much better PPL. The gain is the allocation: spreading the cut means each matrix is
@@ -260,10 +260,10 @@ A3B, one-shot. Run date 2026-07-28.
 
 **Results.**
 
-| Basis side | down_proj reduction | rank `r` | HellaSwag | MMLU | wiki2 / c4 PPL | L0 fit rel_err |
-| ---------- | ------------------- | -------- | --------- | ---- | -------------- | -------------- |
-| Output-side | 37.5% | 768 | **76.27** | **78.33** | **9.42 / 14.99** | ~0.33 |
-| Input-side | 37.5% | 439 | 74.09 | 77.30 | 11.10 / 17.18 | ~0.40 |
+| Basis side  | down_proj reduction | rank`r` | HellaSwag       | MMLU            | wiki2 / c4 PPL         | L0 fit rel_err |
+| ----------- | ------------------- | --------- | --------------- | --------------- | ---------------------- | -------------- |
+| Output-side | 37.5%               | 768       | **76.27** | **78.33** | **9.42 / 14.99** | ~0.33          |
+| Input-side  | 37.5%               | 439       | 74.09           | 77.30           | 11.10 / 17.18          | ~0.40          |
 
 **Analysis.** **Output-side wins on every metric** — +2.2 pt HellaSwag, +1.0 pt MMLU, and lower PPL
 (c4 14.99 vs 17.18). The fit-quality signal predicts it: the output-side basis, spanning the larger
@@ -327,19 +327,19 @@ Calibration c4, 128 seqs × 1024 tok. Configs `qwen3_30b_a3b_nystrom_moe{,_teach
 
 **Results.**
 
-| Run | HellaSwag | MMLU | PPL wiki2 / c4 |
-| --- | --------- | ---- | -------------- |
-| self, 800 it (under-trained) | 65.46 | 60.92 | 13.46 / 17.98 |
-| fix 1 — self, 1500 it | **66.24** | 60.70 | 12.97 / 17.69 |
-| fix 2 — teacher, 1500 it | 65.97 | **61.24** | 12.97 / 17.75 |
+| Run                          | HellaSwag       | MMLU            | PPL wiki2 / c4 |
+| ---------------------------- | --------------- | --------------- | -------------- |
+| self, 800 it (under-trained) | 65.46           | 60.92           | 13.46 / 17.98  |
+| fix 1 — self, 1500 it       | **66.24** | 60.70           | 12.97 / 17.69  |
+| fix 2 — teacher, 1500 it    | 65.97           | **61.24** | 12.97 / 17.75  |
 
 Per-layer fit quality (init → post-fit block-output MSE, run `…-0716-103639`, mean per band):
 
-| Layer band | init MSE | final MSE | mean reduction |
-| ---------- | -------- | --------- | -------------- |
-| L0–L11 (shallow) | 1.1e-4 | 4.6e-5 | 2.3× |
-| L12–L35 (mid) | 3.8e-4 | 1.5e-4 | 2.6× |
-| L36–L47 (deep) | 5.4e-3 | 3.6e-3 | 1.6× |
+| Layer band        | init MSE | final MSE | mean reduction |
+| ----------------- | -------- | --------- | -------------- |
+| L0–L11 (shallow) | 1.1e-4   | 4.6e-5    | 2.3×          |
+| L12–L35 (mid)    | 3.8e-4   | 1.5e-4    | 2.6×          |
+| L36–L47 (deep)   | 5.4e-3   | 3.6e-3    | 1.6×          |
 
 **Analysis.** Converging the fit (fix 1) lifted deep-layer block-MSE reduction from ~1× (the 800-iter
 run gave up at L47) to **4–5×**; fix 2's clean-trajectory target edges MMLU up further (best 61.24).

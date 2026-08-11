@@ -15,11 +15,12 @@ Two single-panel figures:
     Establishes: a small fraction of neurons carries essentially all the output.
 
   * ``fig_token_specific.pdf`` (slide 8) — the extension the reference lacks.
-    For one expert, per-neuron keep-frequency (as a 0%–100% ratio, sorted desc):
-    each token keeps its own top-``budget`` channels, and we plot how often each
-    neuron lands in that kept set. Almost nothing is always-on or always-off; the
-    curve clusters at the budget ρ. Establishes: which channels matter is decided
-    per token, so no fixed within-expert keep-set works.
+    For one expert, we walk the tokens routed to it in sequence order; each token
+    keeps its own top-``budget`` channels, and we plot, per token, how much of
+    that kept set was *also* kept by the immediately preceding routed token
+    (|A∩B|/B, a 0%–100% ratio). Consecutive tokens overlap only ~a third of the
+    time, so which channels matter is decided per token — no fixed within-expert
+    keep-set, and no "reuse the last token's mask" shortcut, works.
 """
 
 import argparse
@@ -47,9 +48,9 @@ plt.rcParams.update({
     "pdf.fonttype": 42, "ps.fonttype": 42,
     "axes.edgecolor": "#cfd6e0", "axes.labelcolor": INK,
     "xtick.color": MUTED, "ytick.color": MUTED,
-    "axes.titlesize": 9.2, "axes.labelsize": 8.4,
-    "xtick.labelsize": 7.6, "ytick.labelsize": 7.6,
-    "legend.fontsize": 7.4, "figure.titlesize": 10.5,
+    "axes.titlesize": 9.2, "axes.labelsize": 13.0,
+    "xtick.labelsize": 12.0, "ytick.labelsize": 12.0,
+    "legend.fontsize": 12.0, "figure.titlesize": 10.5,
     "savefig.bbox": "tight", "axes.grid": True,
     "grid.color": "#eef1f6", "grid.linewidth": 0.7,
 })
@@ -97,41 +98,32 @@ def fig_sparse_suffices(d, out_dir, stats, rho=0.95):
     centers = 0.5 * (edges[:-1] + edges[1:])
     kept = np.abs(centers) >= thr
     ax.bar(centers[~kept], counts[~kept], width=np.diff(edges)[0],
-           color=BLUE, alpha=0.9, label=f"deactivated (bottom {rho * 100:.0f}%)")
+           color=GREY, alpha=0.85, label=f"deactivated (bottom {rho * 100:.0f}%)")
     ax.bar(centers[kept], counts[kept], width=np.diff(edges)[0],
-           color=AMBER, alpha=0.95, label="kept (surviving tail)")
+           color=BLUE, alpha=0.95, label="activated (large magnitude)")
     ax.axvline(thr, color=INK, lw=0.9, ls=":")
     ax.axvline(-thr, color=INK, lw=0.9, ls=":")
     ax.set_xlabel("SwiGLU activation output  $h_j = \\mathrm{SiLU}(gate_j\\!\\cdot\\! x)\\,(up_j\\!\\cdot\\! x)$")
     ax.set_ylabel("count")
-    ax.text(0.03, 0.94,
-            f"{near0 * 100:.0f}% of activations are ~0\n"
-            f"(|h| < 0.003)", transform=ax.transAxes, fontsize=7.2,
-            color=INK, va="top",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#f4f6fa",
-                      edgecolor="#d9dfe8", lw=0.6))
-    ax.legend(frameon=False, loc="upper right")
+    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.02),
+              ncol=2, borderaxespad=0.0)
     _clean(ax)
 
-    ax.set_title(
-        f"One expert's activations are long-tailed — a few neurons carry it\n"
-        f"expert {e}, layer {li}  ·  Qwen3-30B-A3B, WikiText-2, {T:,} tokens",
-        loc="left", color=INK, weight="bold")
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(out_dir, f"fig_sparse_suffices.{ext}"), dpi=400)
     plt.close(fig)
 
 
 def fig_token_specific(d, out_dir, stats, budget_frac=0.25):
-    """Slide 8 — within one expert, no fixed keep-set works.
+    """Slide 8 — consecutive tokens don't reuse each other's kept channels.
 
-    Single panel: per-neuron keep-frequency for **one** expert. Each token routed
-    to this expert keeps its own top-``budget_frac`` channels (here 25%); we plot,
-    for each of the expert's ``I`` neurons, the fraction of those tokens that keep
-    it — as a ratio 0%–100% on the y-axis, neurons sorted by that frequency. If a
-    fixed within-expert keep-set worked, a ``budget_frac`` slice would sit at
-    ~100% and the rest at ~0%; instead the curve is smooth and clusters at the
-    budget line ρ, so which channels fire is decided per token.
+    Single panel: walk the tokens routed to **one** expert in sequence order.
+    Each token keeps its own top-``budget_frac`` channels (here 25%); the x-axis
+    is the token index in that routed stream, and the y-axis is the fraction of
+    this token's kept set that the *immediately preceding* routed token also kept
+    (|A∩B|/B, 0%–100%). If channel choice were stable across neighbours the curve
+    would sit near 100%; instead it hovers around a third, so the kept set is
+    decided per token — even reusing the last token's mask fails.
     """
     li, e = _primary_target(d)
     H = np.abs(d[f"h_L{li}_e{e}"].astype(np.float32))  # (T, I) |SwiGLU|
@@ -145,38 +137,40 @@ def fig_token_specific(d, out_dir, stats, budget_frac=0.25):
     rows = np.arange(T)[:, None]
     keep[rows, order[:, :B]] = True
 
+    # overlap of each token's kept set with the previous routed token's: |A∩B|/B
+    overlap = (keep[1:] & keep[:-1]).sum(1) / float(B) * 100.0   # (T-1,)
+    x = np.arange(1, T)
+    mean_ov = float(overlap.mean())
+
     fig, ax = plt.subplots(1, 1, figsize=(6.0, 3.6))
 
-    freq = np.sort(keep.mean(0))[::-1] * 100.0         # (I,) %, sorted desc
-    x = np.arange(I)
-    ax.fill_between(x, 0, freq, color=PURPLE, alpha=0.28, step="mid")
-    ax.plot(x, freq, color=PURPLE, lw=1.8)
-    ax.axhline(budget_frac * 100, color=RED, lw=1.4, ls="--")
-    ax.text(I * 0.985, budget_frac * 100 + 3.0,
-            f"per-token budget  $\\rho$ = {budget_frac * 100:.0f}%",
-            fontsize=7.4, color=RED, ha="right", va="bottom")
+    ax.fill_between(x, 0, overlap, color=PURPLE, alpha=0.20)
+    ax.plot(x, overlap, color=PURPLE, lw=0.8, alpha=0.9)
+    ax.axhline(mean_ov, color=RED, lw=1.6, ls="--")
+    ax.text(T * 0.985, mean_ov + 2.5, f"mean = {mean_ov:.0f}%",
+            fontsize=7.8, color=RED, ha="right", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                      edgecolor="none", alpha=0.85))
 
-    freq01 = keep.mean(0)
-    always = float(np.mean(freq01 > 0.95)); never = float(np.mean(freq01 < 0.05))
-    stats[f"L{li}e{e}_freq_always_on"] = always
-    stats[f"L{li}e{e}_freq_never"] = never
+    stats[f"L{li}e{e}_consec_overlap_mean"] = mean_ov / 100.0
+    stats[f"L{li}e{e}_consec_overlap_median"] = float(np.median(overlap)) / 100.0
     stats[f"L{li}e{e}_budget_frac"] = float(budget_frac)
     ax.text(0.97, 0.94,
-            f"{always * 100:.1f}% of neurons kept >95% of the time\n"
-            f"{never * 100:.0f}% kept <5% of the time\n"
-            f"the rest cluster at the budget $\\rho$",
+            f"consecutive tokens share only\n"
+            f"{mean_ov:.0f}% of their kept channels\n"
+            f"(random chance would be {budget_frac * 100:.0f}%)",
             transform=ax.transAxes, ha="right", va="top", fontsize=7.0, color=INK,
             bbox=dict(boxstyle="round,pad=0.3", facecolor="#f4f6fa",
                       edgecolor="#d9dfe8", lw=0.6))
-    ax.set_xlabel("neuron of this expert, sorted by keep-frequency")
-    ax.set_ylabel("% of the expert's tokens that keep the neuron")
-    ax.set_xlim(0, I); ax.set_ylim(0, 100)
+    ax.set_xlabel("token index (routed to this expert, in sequence order)")
+    ax.set_ylabel("% of kept channels shared with the previous token")
+    ax.set_xlim(1, T); ax.set_ylim(0, 100)
     _clean(ax)
 
     ax.set_title(
-        f"No channel is always on or always off — kept set is token-specific\n"
-        f"expert {e}, layer {li}  ·  Qwen3-30B-A3B  ·  per-token budget "
-        f"ρ = {budget_frac * 100:.0f}%",
+        f"Consecutive tokens barely reuse each other's channels\n"
+        f"expert {e}, layer {li}  ·  Qwen3-30B-A3B, top {budget_frac * 100:.0f}% "
+        f"kept per token",
         loc="left", color=INK, weight="bold")
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(out_dir, f"fig_token_specific.{ext}"), dpi=400)
@@ -189,7 +183,7 @@ def main():
     ap.add_argument("--npz", default=os.path.join(
         repo, "docs/results/presentation/expert_activation.npz"))
     ap.add_argument("--out-dir", default=os.path.join(repo, "docs/presentation/figs"))
-    ap.add_argument("--rho", type=float, default=0.95)
+    ap.add_argument("--rho", type=float, default=0.80)
     ap.add_argument("--budget", type=float, default=0.25)
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)

@@ -1,0 +1,35 @@
+# Baseline (uncompressed / dense) Qwen3-30B-A3B — FULL MMLU 5-shot.
+# Matches the Level-1 pivchol eval setting (eval_sample_limit: -1, full 14042
+# questions × 57 subtasks) but with prune_ratio 0.0 and no dynamic_alloc, so it
+# is the true dense reference for docs/exps/dynamic_active_param/q3_30b_dynamic_active.md.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: false
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.0
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_baseline_mmlu_full
+scores_dir: ""
+
+attn_implementation: "sdpa"

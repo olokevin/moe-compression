@@ -1,8 +1,8 @@
 {
   "L0e0_T": 8000,
   "L0e0_budget_frac": 0.25,
+  "L0e0_consec_overlap_mean": 0.32544041963578785,
+  "L0e0_consec_overlap_median": 0.3072916666666667,
   "L0e0_frac_near_zero": 0.43315511067708334,
-  "L0e0_freq_always_on": 0.0,
-  "L0e0_freq_never": 0.0013020833333333333,
-  "L0e0_thr_r0.95": 0.0400390625
+  "L0e0_thr_r0.8": 0.01336669921875
 }
