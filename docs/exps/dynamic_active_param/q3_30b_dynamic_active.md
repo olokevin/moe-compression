@@ -27,7 +27,7 @@ Base model `Qwen/Qwen3-30B-A3B-Thinking-2507`, scores from
 | Dynamic contrib × leverage   | contribution | leverage       | 51.49%  | 69.46%   |
 
 \* Dense baseline `-Thinking-2507` (78.56%) carried from
-`docs/results/attribution_guided/nystrom.md`.
+`../total_param/methods/attribution_guided_nystrom.md`.
 
 **Why the static attribution-guided 33% rows are *not* the right baseline.**
 The static pruning pipeline's "33%" is 33% of the **expert-FFN storage** — it
@@ -44,7 +44,8 @@ shrink the per-token active path to ρ≈0.67:
   keep-set.
 - **Uniform MoBE** — one-shot MoBE decomposition to 67% (`compression_ratio: 0.67`, 16 bases, rank 768, no fine-tuning); shrinks the active per-token FFN
   work by ~33%. Source:
-  `run_results/.../compress_then_train/ce_mobe_calib-c4-0.67_*/benchmark_comparison.json`.
+  `run_results/A100-Sagemaker/outputs/compress_then_train/ce_mobe_calib-c4-0.67_1.0e-04-0716-070717/benchmark_comparison.json`
+  (`m=16`, rank 768).
   Caveat: MoBE/uniform-nystrom baselines ran on base `Qwen3-30B-A3B` (dense
   77.68%), whereas the dynamic rows use `-Thinking-2507` (dense 78.56%) — so
   treat the cross-model gap of ~0.9pt as noise when comparing.
@@ -92,7 +93,7 @@ slimming). Both cut per-token active expert-FFN params by ~50%.
 | Dynamic coverage × leverage            | coverage_alloc | leverage       | 54.92%           | 72.94%           |
 | **Level 1 — pivchol global g²** | pivchol_global | pivot-Cholesky | **56.05%** | **74.26%** |
 
-\* Dense baseline carried from `docs/results/attribution_guided/nystrom.md`.
+\* Dense baseline carried from `../total_param/methods/attribution_guided_nystrom.md`.
 stderr ≈ 0.43–0.44pt on acc_norm for all rows.
 
 **Takeaways (50%).**
@@ -741,7 +742,19 @@ acc_norm / acc vs whole-FFN active cut, both from the halved-K path unless noted
 | −58.3%          | top-4 ×`noW` −50% | 75.67              | 77.30    |
 | −62.5%          | top-4 ×`noW` −75% | 75.14              | 76.58    |
 | −66.7%          | top-4 ×`up` −50%  | 74.02              | 77.18    |
+| **−70.3%**      | **`sparse_probe` 4-bit/dense-x, ρ=0.125** | **76.95** | — |
 | −75.0%          | top-4 ×`up` −75%  | 69.99              | 74.31    |
+| **−84.2%**      | **`sparse_probe` 3-bit/keep-25%, ρ=0.125** | **74.56** | *running* |
+
+**The two `sparse_probe` rows dominate this table** — and they are the only rows
+that are not oracles. `sparse_probe` ranks channels from a low-precision proxy read
+on a subset of `x`'s coordinates, so it is deployable, whereas every other row reads
+the true per-token `|inter|` or `|up|`. At **−84.2%** it beats the previous
+frontier's **−66.7%** oracle row (74.56 vs 74.02) — i.e. **+17.5pt of extra
+whole-FFN cut at equal accuracy** — and at −70.3% it scores 76.95, within 1 stderr
+of `oracle_mag_noW`'s 77.11 (which itself only reaches −29.2%). Full design study,
+including ten cheaper scoring mechanisms measured and rejected, in
+[`sparse_probe.md`](sparse_probe.md).
 
 **Bottom line.** Accuracy holds within ~3.4pt (HellaSwag) / ~4.3pt (MMLU) of dense
 out to a **−62.5%** active expert-FFN cut with **no fine-tuning**, and −66.7% is
@@ -803,6 +816,39 @@ artifacts needed. Orchestrator (4 waves × 2 jobs × 4 GPUs):
 `scripts/run_topk4_stack_sweep.sh`. The plain top-4 MMLU reference row is
 `configs/eval/qwen3_30b_a3b_reduce_topk4_mmlu.yaml` (independent, so run in
 parallel on the second box rather than as a fifth wave).
+
+### Raw result artifacts
+
+All raw eval JSON / logs are mirrored locally under `run_results/<host>/` (pulled
+from the A100 boxes 2026-08-11, model weights excluded). Each eval run dir holds
+`lm_harness/{hellaswag-fs0,mmlu-fs5}-results.json`; run logs are in
+`run_results/<host>/run_logs/`. Host and dir stamp per group:
+
+- **Dense baseline (full MMLU 5-shot, 80.91):**
+  `run_results/A100-Sagemaker/results_eval/qwen3_baseline_mmlu_full_20260811_042503/lm_harness/mmlu-fs5-results.json`
+  (log `run_logs/dense_mmlu_full_0811-042456.log`). The older 50/subtask baseline (82.0) is
+  `run_results/A100-New/results_eval/qwen3_baseline_mmlu_20260709_212852/`.
+- **33% study (HellaSwag):**
+  `run_results/A100-New/results_eval/qwen3_dynamic_{prob,contrib,uniform}_{act,lev}_hellaswag_*/`.
+- **50% study + Level-1 (HellaSwag, leverage):**
+  `run_results/A100-Sagemaker/results_eval/qwen3_dynamic_{prob,coverage,uniform}_lev50_hellaswag_*/`,
+  Level-1 `qwen3_dynamic_pivchol_lev50_hellaswag_20260722_012934/`,
+  reduce-top-4 baseline `qwen3_reduce_topk4_hellaswag_20260720_175201/` (all A100-Sagemaker).
+- **Budget sweep (HellaSwag), Level-1 + prob_act baseline:**
+  `run_results/A100-Sagemaker/results_eval/qwen3_dynamic_{pivchol,prob_act}_{625,75,875}_hellaswag_*/`.
+- **Level-1 MMLU budget sweep:** 50/62.5/87.5% on
+  `run_results/A100-New/results_eval/qwen3_dynamic_pivchol_{50_mmlu_20260808_042947,625_mmlu_20260808_043139,875_mmlu_20260808_102056}/`;
+  75% on `run_results/A100-Sagemaker/results_eval/qwen3_dynamic_pivchol_75_mmlu_20260722_210825/`.
+  `prob_act` MMLU baseline: `qwen3_dynamic_prob_act_75_mmlu_*` (A100-Sagemaker).
+- **Level-2 `oracle_mag` / `pubsub` (HellaSwag + MMLU):**
+  `run_results/A100-New/results_eval/qwen3_30b_a3b_dynamic_{oracle_mag,pubsub}_{50,625,75,875,95}_{hellaswag,mmlu}_*/`.
+- **Q1/Q2 ablations (`oracle_mag_noW`, `oracle_up`):**
+  `run_results/A100-New/results_eval/qwen3_30b_a3b_dynamic_{oracle_mag_noW,oracle_up}_{75,875}_{hellaswag,mmlu}_*/`.
+- **top-4 stacking:**
+  `run_results/A100-New/results_eval/qwen3_30b_a3b_dynamic_topk4_{oracle_mag_noW,oracle_up}_{50,75}_{hellaswag,mmlu}_*/`;
+  plain top-4 MMLU reference `run_results/A100-Sagemaker/results_eval/qwen3_30b_a3b_reduce_topk4_mmlu_20260803_155716/`.
+- **Uniform-MoBE baseline (ρ=0.67, `m=16`):**
+  `run_results/A100-Sagemaker/outputs/compress_then_train/ce_mobe_calib-c4-0.67_1.0e-04-0716-070717/benchmark_comparison.json`.
 
 ## Notes
 

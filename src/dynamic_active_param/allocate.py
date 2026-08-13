@@ -37,7 +37,19 @@ _VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "
 #   oracle_up       : g * |up|    * ||W_down[:,j]||        (Q2: rank by up_proj output;
 #                                                           reduces gate_proj + down_proj)
 #   pubsub          : offline public-subspace private score
-_CROSS_EXPERT_CRITERIA = ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub")
+#   lowrank_scorer  : g * |SiLU(gate_hat) * up_hat| from cheap block-low-rank
+#                     factors of W_gate/W_up (or g * |up_hat| in up-only mode).
+#                     The decision precedes every full-width matmul, so all three
+#                     expert matrices are gathered to budget — see
+#                     src/dynamic_active_param/lowrank_scorer.py.
+#   sparse_probe    : same signal as oracle_mag_noW, but from b-bit weights read on
+#                     the top-|x| coordinates only — full rank, low precision,
+#                     which is the axis the low-rank family got wrong. Decision
+#                     also precedes all three matmuls. See sparse_probe.py.
+_CROSS_EXPERT_CRITERIA = (
+    "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
+    "sparse_probe", "channel_router",
+)
 
 
 def select_global_topB(score: torch.Tensor, B: int, chunk: int = 4096) -> torch.Tensor:

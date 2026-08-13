@@ -1,0 +1,52 @@
+# Learned channel router (docs/exps/dynamic_active_param/channel_router.md), predicted
+# keep-mask on all 48 MoE layers. The router is trained at the Phase-0 re-derived budget
+# B = 1536 of 6144 (25% of activated channels would be slack 1.0); this config runs it
+# with slack 3.0, so the realized per-token keep is 4608 of 6144 = **75% of the
+# activated expert-FFN channels** (25.0% channel cut). Masking simulation, no fine-tuning.
+#
+# Comparison points already in the repo at the same *channel* budget:
+#   rho=0.25: oracle_mag HS 78.28 / MMLU 80.53
+#   rho=0.50: oracle_mag HS 78.54 / MMLU 80.22
+# Dense: HellaSwag 78.56, MMLU 80.91. wikitext2 dPPL for this config: +3.9%.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_channel_router_keep75_mmlu"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 8
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.75           # B = (1 - 0.75) * K * I = 1536
+  dynamic_alloc:
+    enabled: true
+    criterion: "channel_router"
+    k_min: 0
+    router:
+      ckpt: /home/ubuntu/yequan/moe-compression/docs/results/channel_router/all_layers/router_all_rho0.25.pt
+      mode: "predict"
+      slack: 3.0          # realized keep = round(1536 * 3.0) = 4608
+      collect_stats: true
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_30b_a3b_channel_router_keep75_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

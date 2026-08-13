@@ -92,7 +92,8 @@ investigation. Cause: the fit helps mid layers (already the cheapest) and fails
 the deep layers that dominate end-to-end error; the surviving ~0.20 per-block
 error compounds over depth. Source: run
 `ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639`,
-`docs/results/mobe/nystrom_moe_benchmark_comparison.json`.
+`nystrom_moe_benchmark_comparison.json` (this dir; raw at
+`run_results/A100-New/outputs/compress_then_train/ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639/benchmark_comparison.json`).
 
 ### Comparison — MoBE at 33% (partial, per-layer only)
 

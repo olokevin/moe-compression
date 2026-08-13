@@ -18,9 +18,18 @@ from src.base.shared_utils.safe_isinstance import (
     _get_experts,
     _get_moe_intermediate_size,
     _get_num_hidden_layers,
+    _get_num_hidden_size,
     _get_topk,
 )
 from src.dynamic_active_param.block import dynamic_moe_block_forward
+from src.dynamic_active_param.lowrank_scorer import (
+    build_layer_scorer,
+    print_scorer_accounting,
+)
+from src.dynamic_active_param.sparse_probe import (
+    build_layer_probe,
+    print_probe_accounting,
+)
 from src.dynamic_active_param.precompute import AllocArtifact
 
 __all__ = ["install_dynamic_alloc"]
@@ -36,6 +45,7 @@ def install_dynamic_alloc(
     beta: float = 1.0,
     col_norm=None,
     pubsub_artifact=None,
+    scorer_kwargs=None,
 ):
     """Bind the dynamic MoE forward onto every MoE block of ``model``.
 
@@ -46,6 +56,9 @@ def install_dynamic_alloc(
         criterion: router_prob | contribution | uniform.
         k_min: per-expert floor on kept channels.
         verbose: print progress.
+        scorer_kwargs: for ``criterion='lowrank_scorer'`` — dict with ``m``,
+            ``n``, ``rank``, ``use_gate`` (bool), optional ``niter`` and
+            ``compute_device``. Cores are factorized per layer at install time.
 
     Returns:
         The same model, with dynamic forwards installed.
@@ -53,9 +66,29 @@ def install_dynamic_alloc(
     I = _get_moe_intermediate_size(model)
     K = _get_topk(model)
     B = int(round((1.0 - prune_ratio) * K * I))
+    # Per-layer (p, rho) schedule from scripts/probe_layer_surface.py: layers differ
+    # ~2.8x in rel_err at identical cost, so a uniform schedule overspends on the
+    # cheap layers. Keyed by absolute layer index; layers absent from the schedule
+    # fall back to the global prune_ratio / rho_input.
+    schedule = None
+    if criterion == "sparse_probe" and (scorer_kwargs or {}).get("schedule_path"):
+        import json as _json
+        with open(scorer_kwargs["schedule_path"]) as _f:
+            _sched = _json.load(_f)
+        if isinstance(_sched, dict):          # a full layer_surface.json solution
+            _sched = _sched.get("schedule", _sched)
+        schedule = {int(e["layer"]): e for e in _sched}
+        _print(
+            f"[DynamicAlloc] per-layer probe schedule: {len(schedule)} layers from "
+            f"{scorer_kwargs['schedule_path']} (mean kept "
+            f"{sum(e.get('kept', 0.0) for e in schedule.values())/max(len(schedule),1):.4f})"
+        )
     # Cross-expert criteria emerge per-expert quotas from a global threshold, so
     # they impose no k_min floor (a dominated expert may get 0 channels).
-    cross_expert = criterion in ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub")
+    cross_expert = criterion in (
+        "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
+        "sparse_probe",
+    )
     if not cross_expert:
         B = max(K * k_min, min(B, K * I))  # keep feasible
     else:
@@ -75,6 +108,23 @@ def install_dynamic_alloc(
             f"[DynamicAlloc] Installing: criterion={criterion}, metric={metric_str}, "
             f"K={K}, I={I}, prune_ratio={prune_ratio}, B={B} (of K*I={K*I}), k_min={k_min}"
         )
+    if criterion == "lowrank_scorer" and verbose:
+        sk = scorer_kwargs or {}
+        print_scorer_accounting(
+            I=I, H=_get_num_hidden_size(model), m=sk["m"], n=sk["n"],
+            rank=sk["rank"], n_scorers=2 if sk.get("use_gate", True) else 1,
+            prune_ratio=prune_ratio,
+        )
+    if criterion == "sparse_probe" and verbose:
+        sk = scorer_kwargs or {}
+        print_probe_accounting(
+            bits=sk.get("bits", 3), group=sk.get("group", 128),
+            rho_input=sk.get("rho_input", 0.25),
+            use_gate=sk.get("use_gate", True),
+            rho_channel=1.0 - prune_ratio,
+            lam=sk.get("lam", 1.0),
+            input_alloc=sk.get("input_alloc", "uniform"),
+        )
 
     num_layers = _get_num_hidden_layers(model)
 
@@ -87,6 +137,7 @@ def install_dynamic_alloc(
         experts = _get_experts(moe_block)
         if experts is None:
             continue
+        per_layer_B = B          # overridden below when a schedule applies
 
         if n_moe_layers is not None and mask_idx >= n_moe_layers:
             raise IndexError(
@@ -116,6 +167,44 @@ def install_dynamic_alloc(
             )  # (E, I) = ||W_down[:, j]||_2 per expert/channel
             moe_block._dyn_col_norm = cn.to(block_device)
 
+        # lowrank_scorer: factorize this layer's up_proj (and optionally
+        # gate_proj) into block-low-rank cores used as the online ranking proxy.
+        if criterion == "lowrank_scorer":
+            sk = scorer_kwargs or {}
+            moe_block._dyn_sc_up = build_layer_scorer(
+                experts, "up_proj", m=sk["m"], n=sk["n"], rank=sk["rank"],
+                niter=sk.get("niter", 4), compute_device=sk.get("compute_device"),
+            )
+            moe_block._dyn_sc_gate = (
+                build_layer_scorer(
+                    experts, "gate_proj", m=sk["m"], n=sk["n"], rank=sk["rank"],
+                    niter=sk.get("niter", 4), compute_device=sk.get("compute_device"),
+                )
+                if sk.get("use_gate", True)
+                else None
+            )
+
+        # sparse_probe: b-bit copies of this layer's up_proj (and gate_proj) used
+        # as the online ranking proxy, read on the token's top-|x| coordinates.
+        if criterion == "sparse_probe":
+            sk = scorer_kwargs or {}
+            keep_L = float(sk.get("rho_input", 0.25))
+            B_L = B
+            if schedule is not None and layer_idx in schedule:
+                ent = schedule[layer_idx]
+                keep_L = float(ent["p"])
+                B_L = min(int(round(float(ent["rho"]) * K * I)), K * I)
+            moe_block._dyn_probe = build_layer_probe(
+                experts, bits=int(sk.get("bits", 3)),
+                group=int(sk.get("group", 128)),
+                use_gate=bool(sk.get("use_gate", True)),
+                rho_input=keep_L,
+                compute_device=sk.get("compute_device"),
+                input_alloc=str(sk.get("input_alloc", "uniform")),
+            )
+            moe_block._dyn_probe_lam = float(sk.get("lam", 1.0))
+            per_layer_B = B_L
+
         # pubsub: private ranks/gains + public carriers.
         if criterion == "pubsub":
             pa = pubsub_artifact
@@ -124,7 +213,7 @@ def install_dynamic_alloc(
             moe_block._dyn_pub_carrier_idx = pa.carrier_idx[mask_idx].to(block_device)  # (r, E)
             moe_block._dyn_pub_carrier_val = pa.carrier_val[mask_idx].to(block_device)  # (r, E)
 
-        moe_block._dyn_B = B
+        moe_block._dyn_B = per_layer_B
         moe_block._dyn_k_min = int(k_min)
         moe_block._dyn_I = int(I)
         moe_block._dyn_criterion = criterion
@@ -135,5 +224,24 @@ def install_dynamic_alloc(
 
     if verbose:
         _print(f"[DynamicAlloc] ✅ Installed dynamic forward on {n_installed} MoE blocks")
+        if criterion == "sparse_probe" and schedule is not None:
+            # Verify the schedule's realized budget rather than trusting the file:
+            # the accounting claim is the whole point of the experiment.
+            from src.dynamic_active_param.sparse_probe import used_param_fraction
+            n_mat = 2 if (scorer_kwargs or {}).get("use_gate", True) else 1
+            kept = []
+            for layer_idx in range(num_layers):
+                blk = _get_moe_block(model, layer_idx)
+                if _get_experts(blk) is None:
+                    continue
+                rho_channel_L = blk._dyn_B / float(K * I)
+                kept.append(used_param_fraction(blk._dyn_probe.rho_input,
+                                                rho_channel_L, n_mat))
+            mk = sum(kept) / max(len(kept), 1)
+            _print(
+                f"[DynamicAlloc] realized schedule cost over {len(kept)} layers: "
+                f"mean kept={mk:.4f} (used-param cut {100 * (1 - mk):.1f}%), "
+                f"range [{min(kept):.4f}, {max(kept):.4f}]"
+            )
 
     return model

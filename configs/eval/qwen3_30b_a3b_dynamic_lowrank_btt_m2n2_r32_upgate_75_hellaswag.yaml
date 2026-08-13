@@ -1,0 +1,47 @@
+# lowrank_scorer: rank channels by a CHEAP block-low-rank proxy of the SwiGLU
+# intermediate, so the keep-decision precedes every full-width matmul and all
+# three expert matrices can be gathered to budget.
+# 2x2 block grid, per-block rank 32, up+gate; BTT at 2x the SVD cost.
+# 75% intermediate-dim cut. Masking sim, no finetune. HellaSwag 0-shot.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_dynamic_lowrank_btt_m2n2_r32_upgate_75_hellaswag"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.75
+  dynamic_alloc:
+    enabled: true
+    criterion: "lowrank_scorer"
+    k_min: 0
+    scorer:
+      m: 2
+      n: 2
+      rank: 32
+      use_gate: true
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_30b_a3b_dynamic_lowrank_btt_m2n2_r32_upgate_75_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

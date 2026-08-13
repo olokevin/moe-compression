@@ -140,8 +140,53 @@ def main(args, model, tokenizer):
         # oracle_mag_noW (Q1: oracle_mag without the ||W_down|| factor), oracle_up
         # (Q2: rank by up_proj output, cut gate_proj+down_proj) and pubsub (offline
         # shared-public-subspace artifact from covariances).
-        if criterion in ("oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub"):
+        # Learned channel router (docs/exps/dynamic_active_param/plan/channel_router.md):
+        # a per-layer artifact predicts the keep-set from the hidden state alone. The
+        # selector object also accumulates the mask's mass-recall against the exact
+        # oracle during the eval, so the downstream number and the diagnostic that
+        # predicts it come out of the same run.
+        if criterion == "channel_router":
+            from src.channel_router.scorers import install_channel_router
+            from src.channel_router.train_utils import load_router_artifact
+
+            cr_cfg = dynamic_alloc_cfg.get("router", {}) or {}
+            ckpt = cr_cfg.get("ckpt")
+            if not ckpt:
+                raise ValueError("dynamic_alloc.router.ckpt is required for channel_router")
+            mode = cr_cfg.get("mode", "predict")
+            routers = load_router_artifact(ckpt, device="cpu") if mode == "predict" else None
+            layers = cr_cfg.get("layers")
+            _print(
+                f"\n[Step 3] Dynamic allocation (criterion=channel_router, mode={mode}, "
+                f"ckpt={ckpt}, slack={cr_cfg.get('slack', 1.0)})"
+            )
+            sels = install_channel_router(
+                model, prune_ratio=prune_ratio, mode=mode, routers=routers,
+                layers=layers, drop_frac=float(cr_cfg.get("drop_frac", 0.0)),
+                slack=float(cr_cfg.get("slack", 1.0)),
+                top_tiles=int(cr_cfg.get("top_tiles", 0)),
+                collect_stats=bool(cr_cfg.get("collect_stats", True)),
+                verbose=True,
+            )
+            _print(f"[Step 4] ✅ Channel router installed on {len(sels)} MoE blocks")
+            _print(f"\n[Step 6] Start evaluation...")
+            results = eval_dispatch(args, model, tokenizer, verbose=True)
+            summ = [s.summary() for s in sels.values() if s.stats["tokens"]]
+            if summ:
+                mr = sum(s["mass_recall"] for s in summ) / len(summ)
+                rc = sum(s["recall"] for s in summ) / len(summ)
+                _print(f"[Step 6] router mask quality over the eval stream: "
+                       f"mass_recall={mr:.4f} recall={rc:.4f} "
+                       f"(mean over {len(summ)} layers)")
+            _print(f"[Step 6] ✅ Evaluation results: {results}")
+            return
+
+        if criterion in (
+            "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
+            "sparse_probe",
+        ):
             pubsub_artifact = None
+            scorer_kwargs = None
             if criterion == "pubsub":
                 import os as _os
                 from src.dynamic_active_param.pubsub import build_pubsub_artifact
@@ -162,11 +207,65 @@ def main(args, model, tokenizer):
                     model, scores_dir=args.scores_dir, r=r, lambda_r=lambda_r,
                     device=args.device, verbose=True,
                 )
+            elif criterion == "lowrank_scorer":
+                # Cheap block-low-rank proxy of the SwiGLU intermediate as the
+                # ranking signal, so the keep-decision precedes every full-width
+                # matmul. m=n=1 is a plain global rank-r SVD scorer; m,n>1 is the
+                # BTT regime (higher effective rank at the same FLOP cost).
+                sc = dynamic_alloc_cfg.get("scorer", {}) or {}
+                scorer_kwargs = {
+                    "m": int(sc.get("m", 1)),
+                    "n": int(sc.get("n", 1)),
+                    "rank": int(sc.get("rank", 16)),
+                    "use_gate": bool(sc.get("use_gate", True)),
+                    "niter": int(sc.get("niter", 4)),
+                    "compute_device": sc.get("compute_device"),
+                }
+                _print(
+                    f"\n[Step 3] Dynamic allocation (criterion=lowrank_scorer, "
+                    f"m={scorer_kwargs['m']}, n={scorer_kwargs['n']}, "
+                    f"rank={scorer_kwargs['rank']}, "
+                    f"use_gate={scorer_kwargs['use_gate']})"
+                )
+            elif criterion == "sparse_probe":
+                # input_sparse: score from the served up/gate read on the token's
+                # top-rho_input coordinates, so the keep-decision precedes all three
+                # full-width matmuls. bits>=16 with rho_input=1.0 makes this
+                # reduce to oracle_mag_noW exactly (the correctness anchor).
+                #
+                # TWO SPARSITIES, both keep fractions:
+                #   rho_input   (probe.rho_input)      -- coordinates read for SCORING
+                #   rho_channel (= 1 - prune_ratio)    -- channels kept for COMPUTE
+                # rho_channel is carried by the shared prune_ratio key so the dynamic
+                # path stays interchangeable with the static one; it may also be
+                # written directly as probe.rho_channel, which wins if both are set.
+                sc = dynamic_alloc_cfg.get("probe", {}) or {}
+                if sc.get("rho_channel") is not None:
+                    prune_ratio = 1.0 - float(sc["rho_channel"])
+                scorer_kwargs = {
+                    "bits": int(sc.get("bits", 3)),
+                    "group": int(sc.get("group", 128)),
+                    "rho_input": float(sc.get("rho_input", 0.25)),
+                    "use_gate": bool(sc.get("use_gate", True)),
+                    "lam": float(sc.get("lam", 1.0)),
+                    "input_alloc": str(sc.get("input_alloc", "uniform")),
+                    "schedule_path": sc.get("schedule_path"),
+                    "compute_device": sc.get("compute_device"),
+                }
+                _print(
+                    f"\n[Step 3] Dynamic allocation (criterion=sparse_probe / "
+                    f"input_sparse, rho_input={scorer_kwargs['rho_input']}, "
+                    f"rho_channel={1.0 - prune_ratio:.4f}, "
+                    f"bits={scorer_kwargs['bits']}, group={scorer_kwargs['group']}, "
+                    f"use_gate={scorer_kwargs['use_gate']}, lam={scorer_kwargs['lam']}, "
+                    f"input_alloc={scorer_kwargs['input_alloc']})"
+                )
             else:
                 _print(f"\n[Step 3] Dynamic allocation (criterion={criterion})")
             model = install_dynamic_alloc(
                 model, artifact=None, prune_ratio=prune_ratio, criterion=criterion,
                 k_min=k_min, verbose=True, pubsub_artifact=pubsub_artifact,
+                scorer_kwargs=scorer_kwargs,
             )
             _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
             _print(f"\n[Step 6] Start evaluation...")

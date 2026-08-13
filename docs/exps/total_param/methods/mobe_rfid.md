@@ -29,7 +29,7 @@ A100-New) — reference-matched fitter, 2000 fit steps/(layer,type). See both ro
 
 ## Results
 
-Eval protocol matches `docs/results/attribution_guided/nystrom.md`: HellaSwag full 10042 items
+Eval protocol matches `attribution_guided_nystrom.md`: HellaSwag full 10042 items
 `num_fewshot=0` (acc_norm), MMLU full 14042×57 subtasks `num_fewshot=5`; each task in its own
 lm-eval call. Baseline PPL: **wikitext2=8.7029, c4=14.0549**. Baseline MMLU not re-run (known
 82.0 from the nystrom doc); baseline HellaSwag from this run.
@@ -41,9 +41,11 @@ lm-eval call. Baseline PPL: **wikitext2=8.7029, c4=14.0549**. Baseline MMLU not 
 | RFID-MoE (−28.4% MoE params) | 66.80 | 71.32 | 12.6776 | 21.4943 |
 
 Sources: MoBE `benchmark_comparison.json` (run `ce_mobe_calib-c4-0.75_1.0e-04-0715-005135`), copied
-to `docs/results/mobe/mobe_benchmark_comparison.json`; RFID (run
-`ce_rfid_calib-c4-0.625_1.0e-04-0714-184003`), copied to
-`docs/results/mobe/rfid_benchmark_comparison.json`.
+to `mobe_benchmark_comparison.json` (this dir; raw at
+`run_results/A100-New/outputs/compress_then_train/ce_mobe_calib-c4-0.75_1.0e-04-0715-005135/benchmark_comparison.json`);
+RFID (run `ce_rfid_calib-c4-0.625_1.0e-04-0714-184003`), copied to
+`rfid_benchmark_comparison.json` (this dir; raw at
+`run_results/A100-Sagemaker/outputs/compress_then_train/ce_rfid_calib-c4-0.625_1.0e-04-0714-184003/benchmark_comparison.json`).
 
 **MoBE one-shot (no recovery training) deltas vs baseline:**
 - HellaSwag: 77.68 → **73.67** (−4.0 pts)
@@ -64,7 +66,7 @@ read for the −25% point.
 2000 fit steps) loses only **~4–5 pts** at exactly 25% MoE-layer compression (HellaSwag −4.0, MMLU
 −4.8), holding up markedly better than RFID's ~11-pt drop at 28% compression. MoBE also lands close
 to the attribution-guided *pruning* baseline at 25% (HellaSwag 78.45, MMLU 76.04, see
-`docs/results/attribution_guided/nystrom.md`) — competitive on MMLU (77.23 vs 76.04), a few points
+`attribution_guided_nystrom.md`) — competitive on MMLU (77.23 vs 76.04), a few points
 behind on HellaSwag (73.67 vs 78.45). The MoBE↔RFID gap is expected: (1) RFID's headline retention
 relies on the **residual reconstruction module (§3.4), which we intentionally omitted**, and (2) the
 RFID row used the earlier short-cap fitter, whereas the MoBE row used the rewritten reference-matched

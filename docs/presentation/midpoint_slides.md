@@ -62,7 +62,9 @@ The element-wise product `⊙` means each channel j is an independent computatio
 
 ## Slide 5: Framework at a Glance — Results First
 
-**−50% expert-FFN active parameters → −1 MMLU pt, no training**
+**−50% expert-FFN active parameters → −1 MMLU pt, no traini**
+
+**ng**
 
 Score channels per token by `up_proj` activation magnitude; reduce `gate_proj` + `down_proj`.
 

@@ -2,9 +2,9 @@
 
 Consolidated results for every compression method we have run on Qwen3-30B-A3B, merged from:
 
-- `docs/results/attribution_guided/nystrom.md` — structural expert-FFN **pruning** (ridge-leverage
+- `methods/attribution_guided_nystrom.md` — structural expert-FFN **pruning** (ridge-leverage
   ranking + Nyström reconstruction, plus activation-magnitude and uniform baselines).
-- `docs/results/mobe/initial_results.md` — expert-FFN **factorization** (MoBE, RFID-MoE).
+- `methods/mobe_rfid.md` — expert-FFN **factorization** (MoBE, RFID-MoE).
 
 All numbers are **one-shot** (decompose/prune → eval, **no LoRA/CE recovery training**) on the full
 lm-eval-harness tasks. This file is organized as: (1) the **leaderboards** (tables only, bucketed by
@@ -286,7 +286,8 @@ apples-to-apples on fit quality**. Base A3B. Run date 2026-07-14.
 **Analysis.** Trails MoBE at a comparable budget, for two reasons: the omitted residual module (the
 paper's headline retention leans on it) and the short pre-rewrite fit. A fresh RFID run on the new
 fitter (+ residual) is the remaining piece. No RFID 33% run exists yet. Artifact:
-`docs/results/mobe/rfid_benchmark_comparison.json` (run `ce_rfid_calib-c4-0.625_1.0e-04-0714-184003`).
+`docs/exps/total_param/methods/rfid_benchmark_comparison.json` (run `ce_rfid_calib-c4-0.625_1.0e-04-0714-184003`,
+raw at `run_results/A100-Sagemaker/outputs/compress_then_train/ce_rfid_calib-c4-0.625_1.0e-04-0714-184003/benchmark_comparison.json`).
 
 ## 6. Nyström-MoE compress-then-fit (factorization) — run at 33%
 
@@ -350,7 +351,8 @@ mid-stack → 1.2–1.5× by L44–47). The ~0.15 per-block residual compounds o
 activation matching (self or teacher) cannot fully undo a 33% structural cut of all three matrices.
 Still, MMLU 61.24 vs the uniform ablation's 27.40 confirms leverage-guided selection + fit retains real
 signal. A LoRA/CE recovery pass is the clear next step. See `plan/nystrom_fit_diagnosis.md`. Artifact:
-`docs/results/mobe/nystrom_moe_benchmark_comparison.json` (run `ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639`).
+`docs/exps/total_param/methods/nystrom_moe_benchmark_comparison.json` (run `ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639`,
+raw at `run_results/A100-New/outputs/compress_then_train/ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639/benchmark_comparison.json`).
 
 ---
 
@@ -384,13 +386,32 @@ Prefix the 40 GB A100 runs with
 
 ### Raw result artifacts
 
-- Pruning: `run_results/A100-New/results_eval/qwen3_nystrom_{25p,33p,uniform33}_{hellaswag,mmlu}_*/lm_harness/`.
-- MoBE 25%: run `ce_mobe_calib-c4-0.75_1.0e-04-0715-005135`, JSON `docs/results/mobe/mobe_benchmark_comparison.json`.
-- MoBE 33% (`m=16`): run `ce_mobe_calib-c4-0.67_1.0e-04-0716-070717` (A100-Sagemaker).
-- MoBE even-split 33% (`m=38`): fit run `ce_mobe_calib-c4-0.67_1.0e-04-0723-015029`, eval `ce_full_calib-c4-0.67_1.0e-04-0723-234445`.
-- MoBE down-only 37.5%: `ce_mobe_calib-c4-0.625_..._downout375-0728-071517` (output) / `..._downin375-0728-071517` (input).
-- RFID: run `ce_rfid_calib-c4-0.625_1.0e-04-0714-184003`, JSON `docs/results/mobe/rfid_benchmark_comparison.json`.
-- Nyström-MoE: run `ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639`, JSON `docs/results/mobe/nystrom_moe_benchmark_comparison.json`.
+All raw eval JSON / logs are mirrored locally under `run_results/<host>/` (pulled
+from the A100 boxes 2026-08-11, weights excluded). Paths below are host-qualified;
+lm-eval task JSONs live in each run dir's `lm_harness/` subdir, compress-then-train
+metrics in that run's `benchmark_comparison.json`.
+
+- **Pruning (attribution-guided Nyström):**
+  `run_results/A100-New/results_eval/qwen3_nystrom_{25p,33p,uniform33}_{hellaswag,mmlu}_*/lm_harness/`.
+  Also `qwen3_nystrom_50p_*`, `qwen3_oneshot{,50,_33p}_*`, `qwen3_finetuned_mmlu_*`
+  (A100-New) and `qwen3_finetuned50_{c4,hellaswag,mmlu}_*` (A100-Sagemaker).
+- **MoBE 25% (`m=32`):** run `ce_mobe_calib-c4-0.75_1.0e-04-0715-005135` →
+  `run_results/A100-New/outputs/compress_then_train/ce_mobe_calib-c4-0.75_1.0e-04-0715-005135/benchmark_comparison.json`.
+  In-repo copy: `docs/exps/total_param/methods/mobe_benchmark_comparison.json`.
+- **MoBE 33% (`m=16`):** run `ce_mobe_calib-c4-0.67_1.0e-04-0716-070717` →
+  `run_results/A100-Sagemaker/outputs/compress_then_train/ce_mobe_calib-c4-0.67_1.0e-04-0716-070717/benchmark_comparison.json`.
+- **MoBE even-split 33% (`m=38`):** fit run `ce_mobe_calib-c4-0.67_1.0e-04-0723-015029`,
+  eval `ce_full_calib-c4-0.67_1.0e-04-0723-234445` →
+  `run_results/A100-New/outputs/compress_then_train/ce_{mobe_calib-c4-0.67_1.0e-04-0723-015029,full_calib-c4-0.67_1.0e-04-0723-234445}/benchmark_comparison.json`.
+- **MoBE down-only 37.5%:** `ce_mobe_calib-c4-0.625_..._downout375-0728-071517` (output) /
+  `..._downin375-0728-071517` (input) →
+  `run_results/A100-New/outputs/compress_then_train/ce_mobe_calib-c4-0.625_1.0e-04_down{out,in}375-0728-071517/benchmark_comparison.json`.
+- **RFID:** run `ce_rfid_calib-c4-0.625_1.0e-04-0714-184003` →
+  `run_results/A100-Sagemaker/outputs/compress_then_train/ce_rfid_calib-c4-0.625_1.0e-04-0714-184003/benchmark_comparison.json`.
+  In-repo copy: `docs/exps/total_param/methods/rfid_benchmark_comparison.json`.
+- **Nyström-MoE:** run `ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639` →
+  `run_results/A100-New/outputs/compress_then_train/ce_nystrom_moe_calib-c4-0.67_1.0e-04-0716-103639/benchmark_comparison.json`.
+  In-repo copy: `docs/exps/total_param/methods/nystrom_moe_benchmark_comparison.json`.
 
 ---
 
@@ -406,4 +427,4 @@ Prefix the 40 GB A100 runs with
 - **Active vs storage params (25% pruning).** A 25% storage cut yields only ~1.4% *active*-compute cut
   (full-model active ratio 0.986): attribution-guided pruning strips the least-routed experts' channels,
   which rarely enter a token's top-8. Real memory savings but **not** a proportional FLOPs speedup. See
-  `docs/results/attribution_guided/nystrom.md`.
+  `methods/attribution_guided_nystrom.md`.

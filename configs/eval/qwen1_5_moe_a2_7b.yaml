@@ -14,7 +14,9 @@ shrink_gate: true
 
 device: "cuda"
 dtype: "bf16"          # Options: bf16 / fp16 / fp32
-use_wandb: false
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen1_5_moe_a2_7b"
 
 num_workers: 0
 calib_batches: 20

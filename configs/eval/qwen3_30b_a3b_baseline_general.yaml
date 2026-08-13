@@ -13,7 +13,9 @@ shrink_gate: false
 
 device: "cuda"
 dtype: "bf16"
-use_wandb: false
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_baseline_general"
 
 num_workers: 0
 

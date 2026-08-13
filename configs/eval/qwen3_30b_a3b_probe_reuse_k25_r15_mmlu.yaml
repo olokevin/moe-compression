@@ -1,0 +1,52 @@
+# input_sparse (Level-2): no quantization -- the probe reads the
+# *served* up/gate weights themselves on the token's top-25% coordinates by |x|,
+# scores g_e*|SiLU(gate_hat)*up_hat| pooled across the token's K experts, and keeps
+# the global top-B. Zero extra storage (the probe IS the served weight), so the
+# used params = scoring + compute = rho + 2*p/3 = 0.3167,
+# i.e. a 68.3% used-parameter cut at channel keep rho=0.15.
+# Masking sim, no finetune.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_probe_reuse_k25_r15_mmlu"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 8
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.85
+  dynamic_alloc:
+    enabled: true
+    criterion: "sparse_probe"
+    k_min: 0
+    probe:
+      bits: 16            # >=16 => read the served weights, no extra copy
+      group: 128
+      rho_input: 0.25
+      rho_channel: 0.15          # = 1 - prune_ratio (channels kept)
+      use_gate: true
+      lam: 1.0
+      input_alloc: "uniform"
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_30b_a3b_probe_reuse_k25_r15_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

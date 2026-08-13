@@ -15,12 +15,15 @@ Two families of criteria:
   by ``allocate_budgets`` from the router weights alone, then applied in the
   standard per-expert loop.
 - **cross-expert** (Level-2: ``oracle_mag`` | ``oracle_mag_noW`` | ``oracle_up``
-  | ``pubsub``): channels of all K active experts compete on **one global scale**
-  per token, so we materialize each token's ``(K, I)`` intermediate, score it,
-  and keep the global top-``B``. ``oracle_mag_noW`` drops the ``||W_down||``
-  factor from ``oracle_mag`` (Q1); ``oracle_up`` ranks by the ``up_proj`` output
-  instead of the SwiGLU intermediate, so the top-B decision precedes ``gate_proj``
-  and both ``gate_proj`` + ``down_proj`` are cut to budget (Q2).
+  | ``pubsub`` | ``lowrank_scorer``): channels of all K active experts compete on
+  **one global scale** per token, so we materialize each token's ``(K, I)``
+  intermediate, score it, and keep the global top-``B``. ``oracle_mag_noW`` drops
+  the ``||W_down||`` factor from ``oracle_mag`` (Q1); ``oracle_up`` ranks by the
+  ``up_proj`` output instead of the SwiGLU intermediate, so the top-B decision
+  precedes ``gate_proj`` and both ``gate_proj`` + ``down_proj`` are cut to budget
+  (Q2). ``lowrank_scorer`` goes further: it ranks by a **cheap block-low-rank
+  proxy** of the intermediate, so the decision precedes *every* full-width matmul
+  and all three expert matrices are gathered to budget.
 
 The block reads per-layer state attached at install time:
     self._dyn_ranks    (E, I) long   channel ranks by descending score
@@ -30,6 +33,8 @@ The block reads per-layer state attached at install time:
     self._dyn_beta     float          g^{2*beta} sharpness (pivchol_global; M4)
     self._dyn_col_norm (E, I) float   ||W_down[:,j]|| per channel (oracle_mag)
     self._dyn_pub_*    pubsub artifact tensors (pubsub)
+    self._dyn_sc_up    LowRankScorer for up_proj    (lowrank_scorer)
+    self._dyn_sc_gate  LowRankScorer for gate_proj  (lowrank_scorer; None => up-only)
     self._dyn_B        int             total kept channels per token
     self._dyn_k_min    int             per-expert floor
     self._dyn_I        int             per-expert cap (moe_intermediate_size)
@@ -43,6 +48,15 @@ from src.dynamic_active_param.allocate import (
     allocate_budgets,
     select_global_topB,
     _CROSS_EXPERT_CRITERIA,
+)
+from src.dynamic_active_param.lowrank_scorer import scorer_proxy
+from src.dynamic_active_param.sparse_probe import (
+    _ALLOC_BETA,
+    allocate_input_reads,
+    descending_abs_ranks,
+    probe_expert_scores,
+    sparsify_input_by_count,
+    sparsify_input_topk,
 )
 
 __all__ = ["dynamic_moe_block_forward"]
@@ -65,10 +79,44 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
     # signal computable before gate_proj), so it needs each token's (K, I) up
     # activation in addition to the SwiGLU intermediate that feeds down_proj.
     need_up = self._dyn_criterion == "oracle_up"
+    # lowrank_scorer ranks by a cheap block-low-rank proxy of the intermediate,
+    # computed from the hidden state alone — so it needs a (K, I) proxy tensor.
+    need_proxy = self._dyn_criterion == "lowrank_scorer"
+    # sparse_probe ranks by a low-precision / input-sparse proxy, also a (K, I)
+    # tensor computed from the hidden state alone.
+    need_probe = self._dyn_criterion == "sparse_probe"
+    probe_ranks = probe_nkeep = hidden_sp = None
+    if need_probe:
+        probe = self._dyn_probe
+        alloc = getattr(probe, "input_alloc", "uniform")
+        if alloc == "uniform":
+            # Sparsify once per token: the kept coordinate set is a property of the
+            # token, shared by all K of its experts (and by both branches), which is
+            # what the byte accounting in sparse_probe.py charges for.
+            hidden_sp = sparsify_input_topk(hidden_states, probe.rho_input)
+        elif alloc == "colnorm":
+            # Same per-expert budget, but rank coordinates by |x_i|*rms_i(W): the
+            # currency that actually perturbs a score is |x_i| * |w_{j,i}|.
+            cr = probe.col_rms.to(device=hidden_states.device, dtype=torch.float32)
+            k = max(1, int(round(float(probe.rho_input) * hidden_states.shape[-1])))
+            idx = (hidden_states.abs().float() * cr).topk(k, dim=-1).indices
+            hidden_sp = torch.zeros_like(hidden_states).scatter_(
+                -1, idx, hidden_states.gather(-1, idx))
+        else:
+            # router / router2: the pooled read budget is split across the token's
+            # K experts by g_e^beta, so each slot gets its own prefix length of the
+            # shared descending-|x| order. Sort once per token, not once per expert.
+            probe_ranks, sorted_abs = descending_abs_ranks(hidden_states)
+            probe_nkeep = allocate_input_reads(
+                sorted_abs, routing_weights, probe.rho_input,
+                _ALLOC_BETA.get(alloc, 1.0),
+            )                                                   # (T, K)
 
     # Materialize each token's K active-expert intermediates into (T, K, I).
     inter_all = torch.zeros((T, K, I), dtype=dtype, device=device)
     up_all = torch.zeros((T, K, I), dtype=dtype, device=device) if need_up else None
+    proxy_all = (torch.zeros((T, K, I), dtype=torch.float32, device=device)
+                 if (need_proxy or need_probe) else None)
     expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
     expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
     for expert_idx in expert_hit:
@@ -81,6 +129,49 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
         inter_all[top_x, idx] = (expert_layer.act_fn(gate) * up).to(dtype)
         if need_up:
             up_all[top_x, idx] = up.to(dtype)
+        if need_proxy:
+            # Cheap proxy of this expert's intermediate from the rank-r cores.
+            # Computed from `cur` only — in a realized implementation this runs
+            # *before* the full gate/up above, and the true matmuls are then
+            # gathered to the kept channels. The masking simulation keeps the
+            # arithmetic identical while the accounting changes (see docstring).
+            sc_up = self._dyn_sc_up
+            up_hat = scorer_proxy(cur, sc_up.L_core[eid], sc_up.R_core[eid]).float()
+            sc_gate = self._dyn_sc_gate
+            if sc_gate is None:
+                p = up_hat.abs()                                   # up-only proxy
+            else:
+                gate_hat = scorer_proxy(
+                    cur, sc_gate.L_core[eid], sc_gate.R_core[eid]
+                ).float()
+                p = (F.silu(gate_hat) * up_hat).abs()              # up+gate proxy
+            proxy_all[top_x, idx] = p
+        if need_probe:
+            # Proxy on the sparsified input. As with lowrank_scorer, in a realized
+            # implementation this runs *before* the full gate/up above and the true
+            # matmuls are gathered to the kept channels; the masking simulation
+            # keeps the arithmetic identical and changes only the accounting (see
+            # sparse_probe.report_probe_accounting).
+            if hidden_sp is not None:
+                cur_sp = hidden_sp[top_x]                       # shared coord set
+            else:
+                # per-slot read count: this expert reads n_keep[t, idx] coords of
+                # the token's shared |x| order.
+                cur_sp = sparsify_input_by_count(
+                    hidden_states[top_x], probe_ranks[top_x],
+                    probe_nkeep[top_x, idx],
+                )
+            proxy_all[top_x, idx] = probe_expert_scores(cur_sp, probe, eid)
+
+    if self._dyn_criterion == "channel_router":
+        # The learned channel router (and, through the same object, the exact-oracle
+        # and controlled-degradation references of the calibration curve) decides the
+        # keep-mask itself: it may restrict to tiles or force-keep a hot set, so it
+        # returns a mask rather than a score. See src/channel_router/scorers.py.
+        keep = self._dyn_router(
+            hidden_states, routing_weights, selected_experts, inter_all, self._dyn_B
+        )
+        return inter_all, keep
 
     # Score all K*I channels on one per-token scale.
     if self._dyn_criterion in ("oracle_mag", "oracle_mag_noW"):
@@ -93,6 +184,38 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
             score = score * self._dyn_col_norm[selected_experts]  # (T, K, I)
         keep = select_global_topB(score, self._dyn_B)
         return inter_all, keep
+
+    if self._dyn_criterion == "lowrank_scorer":
+        # Rank by the cheap proxy g_e * |ĥ_{e,j}(x)|. The proxy is a function of
+        # the hidden state and the rank-r cores only, so the top-B decision is
+        # available before up_proj/gate_proj/down_proj run at full width — all
+        # three can be gathered to the kept channels. Output is identical to
+        # zeroing the non-kept intermediate before down_proj; what changes versus
+        # oracle_up is the realized cost (see lowrank_scorer.report_scorer_accounting).
+        g = routing_weights.to(torch.float32)                  # (T, K)
+        score = g.unsqueeze(-1) * proxy_all
+        keep = select_global_topB(score, self._dyn_B)
+        return inter_all, keep
+
+    if self._dyn_criterion == "sparse_probe":
+        # Rank by g_e * |SiLU(gate_hat) * up_hat| from b-bit weights read on the
+        # token's top-|x| coordinates only. The decision is a function of the
+        # hidden state and the proxy alone, so it precedes up/gate/down at full
+        # width and all three are gathered to the kept channels.
+        g = routing_weights.to(torch.float32)                  # (T, K)
+        score = g.unsqueeze(-1) * proxy_all
+        lam = float(getattr(self, "_dyn_probe_lam", 1.0))
+        if lam <= 1.0:
+            return inter_all, select_global_topB(score, self._dyn_B)
+        # Cascade: the probe only *nominates* lam*B candidates; the exact up/gate
+        # are then computed on those and the true top-B taken among them. Final
+        # recall therefore equals candidate coverage, which is why a loose probe
+        # suffices — at the price of 2(lam-1)*rho extra exact reads.
+        C = min(K * I, max(self._dyn_B, int(round(lam * self._dyn_B))))
+        cand = select_global_topB(score, C)
+        exact = (g.unsqueeze(-1) * inter_all.abs().float()).masked_fill(
+            ~cand, float("-inf"))
+        return inter_all, select_global_topB(exact, self._dyn_B)
 
     if self._dyn_criterion == "oracle_up":
         # Q2: rank by the up_proj output magnitude (decided before gate_proj), so
