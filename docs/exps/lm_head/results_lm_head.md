@@ -100,10 +100,11 @@ active; a free head → **−9.28%** (the ceiling).
 
 ---
 
-## Results — Qwen3-0.6B (the SLM arm, where the payoff is 3×)
+## Results — Qwen3-0.6B (the SLM arm, where the payoff is 2.2×)
 
-The head is **20.70% of this model's parameters** (vs 9.28% of the 30B's active), which
-is why the plan wanted this arm: the same mechanism buys 2–3× more.
+The head is **20.70% of this model's parameters** against 9.28% of the 30B's active — so
+the same mechanism buys **2.23×** more here. That is the whole reason the plan wanted this
+arm, and it is where the full sweep lives.
 
 Held-out C4, 262 144 tokens, dense PPL **31.863**. The head is **untied first**
 (Qwen3-0.6B ships `tie_word_embeddings: true`); the untie itself adds 155.6 M params,
@@ -132,9 +133,11 @@ so these are savings against the *untied* model, not against the shipped checkpo
 
 ### Reading the table
 
-1. **B1-s ≥ B2 at ~27% storage, and both beat INT4.** Frequency tiering keeps the rows
-   the model actually emits *exact*, which is a better use of 27% of the budget than
-   spreading error uniformly. It needs nothing but a token histogram.
+1. **B1-s edges out B2 at ~27% storage on this model, and both beat INT4.** Frequency
+   tiering keeps the rows the model actually emits *exact*, which is a better use of 27%
+   of the budget than spreading error uniformly, and it needs nothing but a token
+   histogram. Note the 30B reverses this ordering (ARCHead ahead by 0.6 pp) — the margin
+   either way is small; the margin over INT4 is not.
 2. **Below 4 bits the ranking flips.** At ~15% ARCHead (1.911) beats B1-s (2.460), and
    its activation metric is doing the work: without it, 6.626.
 3. **Codebooks reach storage scalars can't.** RVQ at 1.58 b/w (9.88%) gives 1.755 —
