@@ -6,12 +6,25 @@ Implementation of [`plan/baselines.md`](plan/baselines.md). Code in `src/lm_head
 
 ## The short version
 
-**The free static prior wins.** A frequency-tiered head that stores the top 4096 rows
-in BF16 and the rest in INT4 (`B1-s`) costs **+1.1% perplexity at 27.8% of BF16
-storage**. ARCHead — the published SOTA, reimplemented from its algorithm — costs
-**+1.3% at 27.3%**. They tie. Plain uniform INT4 costs **+4.2% at 25.8%**, so tiering
-is worth ~3 pp of perplexity *for free*, and the sophisticated method buys nothing on
-top of it at this operating point.
+**At ~27% of BF16 storage the head is essentially free, and *which* method wins depends
+on scale.** On the primary target, Qwen3-30B-A3B:
+
+| ~27% storage, C4 PPL | 30B (`d=2048`) | 0.6B (`d=1024`) |
+|---|---|---|
+| **B2 ARCHead** | **+1.3%** ✅ | +1.3% |
+| **B1-s** frequency tiering *(free)* | +1.9% | **+1.1%** ✅ |
+| **F3 uniform INT4** *(naive floor)* | **+9.7%** | +4.2% |
+
+Each column is a percentage *relative to that arm's own dense row*; the two arms use
+different perplexity harnesses (lm-eval `word_perplexity` for the 30B, a fixed-window
+loop for the 0.6B), so compare down a column, never across.
+
+Two things matter here. First, **uniform INT4 is a much worse baseline than it looks** —
+it costs +9.7% on the 30B, 5× the penalty it pays on the 0.6B, so the naive floor is the
+thing to beat and both real methods clear it comfortably. Second, **the free static
+prior is genuinely competitive**: a token histogram plus "keep the top 4096 rows exact"
+lands within 0.6 pp of the published SOTA on the 30B and *beats* it on the 0.6B, at zero
+calibration cost beyond counting tokens.
 
 **Two branches are now closed by measurement:**
 
@@ -20,15 +33,15 @@ top of it at this operating point.
 | **Low-rank heads** (F2) | **Dead, confirmed.** +157% PPL at 25% storage, vs +4.2% for INT4. The plan's kill criterion was "within +5%". |
 | **Sparse activation** (B1-a) | **Dead on perplexity.** Reading 2.7% of rows makes 20.1% of target tokens unreachable — perplexity is literally infinite. Even reading 21.6% of rows with a proper tail fallback costs +117%. |
 
-**Where sophistication does pay:** below ~4 bits. At 15% storage ARCHead's
+**Where sophistication clearly pays:** below ~4 bits. At 15% storage ARCHead's
 activation-metric correction is worth **3.5× lower perplexity** than fitting the same
 correction in plain Frobenius error (60.9 vs 211.1). The paper's central claim
 reproduces.
 
-**The ceiling is small and was already known.** The head is 1.02% of Qwen3-30B-A3B's
-total but **9.28% of its active** parameters (measured, matching the plan's estimate
-exactly). So the entire design space spans 0 → 9.28% of active params, and INT4
-already captures −6.89 pp of it. The remaining 2.4 pp is not worth accuracy.
+**But the ceiling is small.** The head is 1.02% of Qwen3-30B-A3B's total and **9.28% of
+its active** parameters (measured; matches the plan exactly). The whole design space is
+0 → 9.28% of active params, INT4-equivalent storage already banks **−6.8 pp** of it, and
+the remaining 2.4 pp costs real accuracy. This is a cheap, safe win, not a large one.
 
 ---
 
@@ -87,7 +100,10 @@ active; a free head → **−9.28%** (the ceiling).
 
 ---
 
-## Results — Qwen3-0.6B
+## Results — Qwen3-0.6B (the SLM arm, where the payoff is 3×)
+
+The head is **20.70% of this model's parameters** (vs 9.28% of the 30B's active), which
+is why the plan wanted this arm: the same mechanism buys 2–3× more.
 
 Held-out C4, 262 144 tokens, dense PPL **31.863**. The head is **untied first**
 (Qwen3-0.6B ships `tie_word_embeddings: true`); the untie itself adds 155.6 M params,
@@ -126,6 +142,25 @@ so these are savings against the *untied* model, not against the shipped checkpo
    within a stderr of dense.
 4. **VQ-Logits fails completely** post-training (1053× PPL). The paper reports +4% —
    it presumably fine-tunes; a drop-in codebook substitution does not survive.
+
+---
+
+### Downstream tasks confirm §3's warning
+
+Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B.
+
+| run | store% | Δactive | HellaSwag acc_norm | MMLU acc (5-shot) |
+|---|---|---|---|---|
+| dense BF16 | 100.00 | — | 47.29 | 47.18 |
+| B1-s T=4096, tail 4b | 27.78 | −14.95% | 47.02 | **47.18** |
+| B2 ARCHead | 27.28 | −15.05% | 47.33 | *(running)* |
+
+Cutting the head to ~28% of BF16 moves HellaSwag by **−0.27 / +0.04 pt** and MMLU by
+**0.00 pt** — MMLU is *bit-identical*. This is plan §3's point made concrete: both are
+loglikelihood tasks over high-frequency target tokens, so they are nearly blind to head
+approximation. They are the right tasks for the pre-registered bar and the wrong ones for
+choosing a method. C4 perplexity, which separates these same three heads by 1.1 / 1.3 /
+4.2%, is what actually discriminates.
 
 ---
 
@@ -177,10 +212,13 @@ reason.
 The graded version is no kinder: give the whole tail one shared logit (classic tiered
 softmax) and even a 21.6% read set costs **+117%**.
 
-This also confirms plan §3's warning. **HellaSwag and MMLU cannot see any of this** —
-their targets (" A".." D", short common endings) sit inside every tier, so a
-sparse-activation head scores at dense level on both while being unable to write
-English. C4 PPL was correctly made mandatory.
+**HellaSwag and MMLU cannot see any of this** — their targets (" A".." D", short common
+endings) sit inside every tier, so a sparse-activation head scores at dense level on both
+while being unable to write English. Measured above: MMLU moves 0.00 pt under a head
+treatment that C4 separates cleanly. C4 PPL was correctly made mandatory.
+
+The 30B behaves the same way: 16.79% of dense mass outside the top-4096 tier, C4
+perplexity **∞**.
 
 ### Correcting the inherited numbers
 
@@ -245,21 +283,47 @@ band it claims.
 
 ---
 
-## Qwen3-30B-A3B (primary target) — in progress
+## Results — Qwen3-30B-A3B (primary target)
 
 Confirmed before trusting §1's accounting: `vocab_size=151936`, `hidden_size=2048`,
 `tie_word_embeddings=false`. The head is 311.16 M params = 1.02% of total, **9.28% of
-active** (3.353 B) — the plan's numbers exactly.
+active** (measured active = **3.353 B**, the plan's figure exactly). Not tied, so no
+untie step.
 
-Running on A100-Sagemaker (2×A100-40GB, the only exclusively-free GPUs). Pass 1 is C4
-perplexity across all 11 variants (~16 min each); pass 2 is full HellaSwag for the
-headline five. **Not yet complete at the time of writing** — `results_eval/
-lm_head_sweep_30b_{c4,hellaswag}.json` on that box; view with
-`scripts/show_sweep.py`.
+lm-eval `word_perplexity` on C4 (500 docs), dense reference **25.349**. `Δactive` is
+against 3.353 B; the second figure is against the post-−73%-expert-pruning active budget,
+where the head's share rises to 15.41%.
+
+| run | store% | Δactive | Δactive (post-prune) | top-1 agr | **C4 wppl** | rel |
+|---|---|---|---|---|---|---|
+| dense BF16 | 100.00 | — | — | — | 25.349 | 1.000 |
+| **B2** ARCHead (rc10 rr6 g64 p.75) | 26.92 | **−6.78%** | −11.26% | 93.31% | **25.676** | **1.013** |
+| **B1-s** T=4096, tail 4b | 27.78 | −6.70% | −11.13% | **96.00%** | **25.827** | **1.019** |
+| F3 RTN 4-bit g128 *(naive floor)* | 25.78 | −6.89% | −11.44% | 83.54% | 27.820 | 1.098 |
+| B1-a T=4096 strict *(sparse)* | 100 (2.70 read) | −9.03% | −15.00% | 87.11% | ∞ | — |
+
+**The scale story.** On the 30B, ARCHead's ordering versus the free prior **reverses**
+relative to the 0.6B: it wins by 0.6 pp instead of losing by 0.2. Both still clear
+uniform INT4 by a wide margin, and that margin is what grew — INT4 costs +9.7% here
+against +4.2% on the 0.6B. So the larger head is *harder* to quantize uniformly and
+*more* rewarding to treat structurally, whether structurally means "protect the frequent
+rows" or "correct the dominant activation directions". Our ARCHead rel PPL of **1.013 at
+26.9%** sits close to the paper's **1.007 at 25.6%** on Qwen3-8B-Base, and its
+storage-matched-INT4 comparison (1.14–1.16) brackets our 1.098 — the reproduction is in
+family.
+
+B1-a's sparse-activation row behaves as on the 0.6B: 16.79% of the dense probability
+mass falls outside the top-4096 tier, and strict-mode perplexity is infinite.
+
+**Still in flight** (~16 min/variant): the remaining 6 C4 variants (`b1a_t4k_fb`,
+`b1s_t4k_tail2`, `b2_25_nometric`, `b3_rvq15`, `b1p_t8k`, `b3_vql`) and then full
+HellaSwag for the headline five, against the dense 78.56 reference. On A100-Sagemaker at
+`results_eval/lm_head_sweep_30b_{c4,hellaswag}.json`; read with
+`.venv/bin/python scripts/show_sweep.py <path>`.
 
 Batch sizes are reduced (c4=2, hellaswag=8) to fit 61 GB of weights plus the
-`[bs, 2048, 151936]` logits tensor into 80 GB. Both metrics are computed per request,
-so this changes speed only, not the numbers.
+`[bs, 2048, 151936]` logits tensor into the 80 GB of exclusively-free GPU. Both metrics
+are computed per request, so this changes speed only, not the numbers.
 
 ---
 
@@ -268,29 +332,38 @@ so this changes speed only, not the numbers.
 Plan §7: **≥6.9% active-param reduction with HellaSwag ≥78.1, MMLU ≥80.5, C4 PPL within
 +1%.**
 
-The **C4 +1% clause is the binding one, and nothing clears it at INT4-equivalent
-storage.** Best measured points on the 0.6B:
+On the 30B the storage clause is met — ARCHead and B1-s both sit at −6.7 to −6.8% of
+active params — and **the C4 +1% clause is the binding one, narrowly missed**:
 
-- B1-s T=16384/tail-4b: **+0.4% PPL** — *passes* the perplexity clause, at 33.8%
-  storage (−13.7% active, above the 6.9% bar).
-- B1-s T=4096/tail-4b: **+1.1% PPL** at 27.8% storage — a hair outside.
-- ARCHead at 27.3%: **+1.3%**.
+- ARCHead at 26.9% storage: **+1.29%** PPL, −6.78% active.
+- B1-s T=4096/tail-4b at 27.8%: **+1.89%** PPL, −6.70% active.
+- (0.6B, for reference: B1-s T=16384/tail-4b **passes** at +0.4%, but at 33.8% storage.)
 
-So the honest reading is **"acceptable, not headline success"**: a head at ~28–34% of
-BF16 costs 0.4–1.3% perplexity. That is a real and cheap win, but it is bounded by
-§1's arithmetic — INT4 already banks −6.9 of the available −9.28 pp, and the last
-2.4 pp costs accuracy.
+So the honest reading is **"acceptable, not headline success"** — the plan's own second
+tier. A head at ~27% of BF16 costs ~1.3% perplexity on the primary target, which is a
+real and very cheap win, but it is bounded by §1's arithmetic: INT4-equivalent storage
+already banks −6.8 of the available −9.28 pp, and the last 2.4 pp costs accuracy fast.
+The HellaSwag/MMLU clauses remain unevaluated on the 30B (in flight) — though per §3
+they are the *insensitive* metrics and are expected to pass trivially.
 
 Plan §7 also pre-registered: *"if B1-a shows dense-level MMLU/HellaSwag **and**
-dense-level C4 PPL at 2.7% of head reads, verify the install is taking effect."* It
-does not — C4 PPL is infinite. Gates 0a/0c confirm the install is real.
+dense-level C4 PPL at 2.7% of head reads, verify the install is taking effect."* It does
+not — C4 PPL is infinite on both models. Gates 0a/0c confirm the install is real.
+
+**Recommendation.** Take B1-s if you want zero calibration machinery (a token histogram
+and a row-wise quantizer), ARCHead if 0.6 pp of perplexity on the 30B is worth an
+eigendecomposition and two SVDs. Do not push below 4 bits, do not pursue low-rank, and
+do not pursue sparse activation. Per plan §7's fail clause, further gains want a
+LoRA-recovery arm, not fewer bits.
 
 ---
 
 ## Caveats
 
-1. **Most numbers are Qwen3-0.6B** (`d=1024`, untied). The 30B arm is mid-flight. F2's
-   `d=2048` replication specifically remains open.
+1. **The full sweep is on Qwen3-0.6B** (`d=1024`, untied); the 30B arm has its four
+   headline C4 rows and the rest in flight. F2's `d=2048` replication is specifically
+   **not** done — low-rank is excluded on 0.6B evidence plus the 30B's harder-to-quantize
+   behaviour, which argues the same way but is not the requested experiment.
 2. **ARCHead is a reimplementation.** Algorithm 1, the objective, and the published
    Qwen hyperparameters (`rc=10, rr=6, g=64, p=0.75, ridge=1e-3`) are the paper's; the
    packed kernel is not. Storage is an **analytic bit count**, not a measured

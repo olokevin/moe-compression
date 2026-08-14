@@ -360,9 +360,14 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
 
     # ---- diagnostics against the dense head, before we overwrite it -------- #
     if cfg.get("diagnostics", True) and H is not None and H.numel():
+        # Always pass the mask when one exists, including for tail_fallback="uniform".
+        # Withholding it made the fallback variants compare an unmodified weight
+        # against itself and report a meaningless 100% agreement. The strict (-inf)
+        # semantics are the right proxy for the fallback too: the shared tail logit is
+        # log(tail_mass / n_tail) ~ -13.5, far below any plausible in-tier max, so the
+        # argmax is the same either way.
         diag = _diagnostics(
-            W_cpu, W_cpu if W_hat is None else W_hat, H,
-            keep_mask=keep_mask if bool(cfg.get("strict", True)) else None,
+            W_cpu, W_cpu if W_hat is None else W_hat, H, keep_mask=keep_mask,
         )
         stats.update(diag)
         if verbose and diag:
