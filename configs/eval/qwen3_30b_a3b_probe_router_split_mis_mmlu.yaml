@@ -1,0 +1,91 @@
+# input_sparse + ROUTER alloc, iso-cost CONTROL arm (mis-allocated split).
+#
+# THE QUESTION: under a fixed used-parameter budget, how should the budget be
+# split between SCORING (rho_input) and COMPUTE (rho_channel)? Every prior row
+# picked rho_input=0.25 by hand and then varied rho_channel, which conflates the
+# split with the budget. This pair fixes the budget at used=0.2500 (-75.0%) and
+# varies ONLY the split.
+#
+# THE PRINCIPLE: minimize rel_err(p, rho) s.t. rho + 2p/3 = C. Separable and
+# smooth, so the optimum equalizes marginal rel_err per unit budget:
+#     (3/2) * d(rel_err)/d(rho_input)  ==  d(rel_err)/d(rho_channel)
+# The 3/2 is the discount rho_input carries (2 branches over a 3-matrix FFN).
+# Solved on the cached 8192-token all-layer surface
+# (docs/results/idea_pilot/layer_surface_8k.json, bilinear in (p, rho)):
+#
+#     budget C   cut      rho_in*  rho_ch*   rel_err   score share
+#     0.2250   -77.5%     0.1875   0.1000    0.4923      55.6%
+#     0.2500   -75.0%     0.1875   0.1250    0.4613      50.0%   <-- the OPTIMUM
+#     0.2667   -73.3%     0.1875   0.1417    0.4445      46.9%
+#
+# THIS ARM = the CONTROL, deliberately mis-allocated: rho_input=0.25 (the
+# hand-picked value every prior row used), which at this budget forces
+# rho_channel down to 1/12 = 0.08333. Same used=0.2500, 66.7% of it on scoring.
+# Predicted rel_err 0.4833 vs the optimum 0.4613 => -0.58 pt. If the optimum does
+# NOT beat this arm by roughly that margin, the allocation principle is wrong.
+# Integer check: 512 coord reads/expert, B=512 of K*I=6144.
+# The optimum for this budget is rho_input=0.1875; rho_input* is pinned there
+# across the whole budget range, i.e. the
+# hand-picked 0.25 was too much scoring at every budget tested.
+#
+# Integer check (K=8, I=768, H=2048): 384 coord reads/expert, B=768 of K*I=6144.
+#
+# PRE-REGISTERED PREDICTION (so this is falsifiable):
+#   surface rel_err 0.4613 vs the measured uniform 0.25/0.100 row's 0.4572
+#   => -26.4 * (+0.0040) = -0.11 pt vs that row's 74.06, i.e. ~73.95 uniform,
+#      ~74.53 with router's measured +0.58 -- but at -75.0% instead of -73.3%.
+#   So: EQUAL accuracy for 1.7pp MORE cut. The paired arm
+#   (..._split_mis_...) is predicted -0.58pt WORSE at the identical budget;
+#   that gap is the real test of the allocation principle.
+# Ladder caveat: validated to +-0.26pt for changes that alter WHICH channels a
+# layer selects (rows 6-7), which is what this is -- one global (p, rho) for all
+# 48 layers, NOT a cross-layer budget move (that failed; see the doc).
+# Surface was measured under UNIFORM alloc, so router's +0.58 is stacked from
+# its own measured end-to-end delta rather than read off the surface.
+#
+# bits=16: probe IS the served weight -> zero extra storage. Masking sim, no finetune.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_probe_router_split_mis_mmlu"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 8
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.9166666666666667   # = 1 - rho_channel (1/12)
+  dynamic_alloc:
+    enabled: true
+    criterion: "sparse_probe"
+    k_min: 0
+    probe:
+      bits: 16
+      group: 128
+      rho_input: 0.25       # SCORING -> 2*0.25/3 = 0.16667 of budget (66.7%) -- TOO MUCH
+      rho_channel: 0.0833333333333333   # COMPUTE -> 0.08333 of budget (33.3%); = 1 - prune_ratio
+      use_gate: true
+      lam: 1.0
+      input_alloc: "router"
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_30b_a3b_probe_router_split_mis_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

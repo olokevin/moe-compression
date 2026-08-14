@@ -48,7 +48,7 @@ _VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "
 #                     also precedes all three matmuls. See sparse_probe.py.
 _CROSS_EXPERT_CRITERIA = (
     "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-    "sparse_probe", "channel_router",
+    "sparse_probe", "weight_sparse", "channel_router",
 )
 
 

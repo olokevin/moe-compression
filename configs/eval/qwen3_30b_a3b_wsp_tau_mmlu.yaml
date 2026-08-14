@@ -1,0 +1,59 @@
+# weight_sparse, threshold mode (uniform input allocation)
+#
+# Unstructured (entry-level) sparse scorer at the 20%-of-dense budget:
+#   used params = rho_channel + 2*density/3 = 0.125 + 2*0.1125/3 = 0.2000
+# i.e. a 80.0% cut with the SAME 12.5% channel budget the full-width oracle
+# (oracle_mag_noW, 77.11 HS / 79.44 MMLU at used 0.792) selects with.
+# Isolates the router allocation's contribution against wsp_tau_router.
+# Masking sim, no finetune. Offline rel_err (scripts/wsparse_screen.py,
+# 4 layers x 4096 C4 tokens): 0.4168 -> predicted 74.7 HellaSwag via the
+# validated -26.4 pt/unit fixed-budget slope.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_wsp_tau_mmlu"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 8
+batch_size: 8
+num_fewshot: 5
+
+prune_kwargs:
+  prune_ratio: 0.875
+  dynamic_alloc:
+    enabled: true
+    criterion: "weight_sparse"
+    k_min: 0
+    wsparse:
+      # threshold mode: per token, one budget-exact tau on |W_ji * x_i| decides how
+      # deep into each coordinate's channel list to read. The ladder is the set of
+      # available channel fractions (geometric, ratio 0.7); measured within 0.04pt
+      # of the exact per-token top-N product rule.
+      alloc_mode: "tau"
+      density: 0.1125             # entries read per token per branch
+      row_fracs: [1.0, 0.7, 0.49, 0.343, 0.24, 0.168, 0.118, 0.082]
+      rho_channel: 0.125          # = 1 - prune_ratio (channels kept for compute)
+      use_gate: true
+      input_alloc: "uniform"
+      tau_iters: 16
+
+eval_task_names: "mmlu"
+output_dir: ./results_eval/qwen3_30b_a3b_wsp_tau_mmlu
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

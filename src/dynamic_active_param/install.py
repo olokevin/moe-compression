@@ -30,6 +30,10 @@ from src.dynamic_active_param.sparse_probe import (
     build_layer_probe,
     print_probe_accounting,
 )
+from src.dynamic_active_param.weight_sparse import (
+    build_layer_wsparse,
+    print_wsparse_accounting,
+)
 from src.dynamic_active_param.precompute import AllocArtifact
 
 __all__ = ["install_dynamic_alloc"]
@@ -87,7 +91,7 @@ def install_dynamic_alloc(
     # they impose no k_min floor (a dominated expert may get 0 channels).
     cross_expert = criterion in (
         "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-        "sparse_probe",
+        "sparse_probe", "weight_sparse",
     )
     if not cross_expert:
         B = max(K * k_min, min(B, K * I))  # keep feasible
@@ -125,6 +129,30 @@ def install_dynamic_alloc(
             lam=sk.get("lam", 1.0),
             input_alloc=sk.get("input_alloc", "uniform"),
         )
+
+    if criterion == "weight_sparse":
+        sk = scorer_kwargs or {}
+        # Per-layer calibration mean of the MoE input, for the mean-fix. One (H,)
+        # vector per MoE layer, keyed by absolute layer index; see
+        # scripts/collect_input_mean.py.
+        wsp_mu = None
+        if sk.get("mean_path"):
+            _obj = torch.load(sk["mean_path"], map_location="cpu")
+            _obj = _obj.get("mean", _obj) if isinstance(_obj, dict) else _obj
+            wsp_mu = {int(k): v for k, v in _obj.items()}
+            _print(f"[DynamicAlloc] mean-fix: {len(wsp_mu)} layer means from "
+                   f"{sk['mean_path']}")
+        if verbose:
+            print_wsparse_accounting(
+                levels=sk.get("levels", "0.25x0.45"),
+                rho_channel=1.0 - prune_ratio,
+                use_gate=bool(sk.get("use_gate", True)),
+                I=I, H=_get_num_hidden_size(model),
+                meanfix=wsp_mu is not None,
+                input_alloc=str(sk.get("input_alloc", "uniform")),
+                alloc_mode=str(sk.get("alloc_mode", "rank")),
+                density=sk.get("density"),
+            )
 
     num_layers = _get_num_hidden_layers(model)
 
@@ -204,6 +232,22 @@ def install_dynamic_alloc(
             )
             moe_block._dyn_probe_lam = float(sk.get("lam", 1.0))
             per_layer_B = B_L
+
+        # weight_sparse: per-column magnitude thresholds (one per staircase level)
+        # over this layer's served up/gate, plus the optional mean-fix bias.
+        if criterion == "weight_sparse":
+            sk = scorer_kwargs or {}
+            moe_block._dyn_wsparse = build_layer_wsparse(
+                experts, levels=sk.get("levels", "0.25x0.45"),
+                use_gate=bool(sk.get("use_gate", True)),
+                mu=None if wsp_mu is None else wsp_mu[layer_idx].to(block_device),
+                input_alloc=str(sk.get("input_alloc", "uniform")),
+                compute_device=sk.get("compute_device"),
+                alloc_mode=str(sk.get("alloc_mode", "rank")),
+                density=sk.get("density"),
+                tau_iters=int(sk.get("tau_iters", 16)),
+                count_reads=bool(sk.get("count_reads", True)),
+            )
 
         # pubsub: private ranks/gains + public carriers.
         if criterion == "pubsub":

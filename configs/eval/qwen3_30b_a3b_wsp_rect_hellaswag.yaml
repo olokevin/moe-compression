@@ -1,0 +1,58 @@
+# weight_sparse, fixed rectangle 25% coordinates x 45% channels
+#
+# Unstructured (entry-level) sparse scorer at the 20%-of-dense budget:
+#   used params = rho_channel + 2*density/3 = 0.125 + 2*0.1125/3 = 0.2000
+# i.e. a 80.0% cut with the SAME 12.5% channel budget the full-width oracle
+# (oracle_mag_noW, 77.11 HS / 79.44 MMLU at used 0.792) selects with.
+# Isolates 'unstructured at all' from 'floated by magnitude': fixed bands, no per-token threshold.
+# Masking sim, no finetune. Offline rel_err (scripts/wsparse_screen.py,
+# 4 layers x 4096 C4 tokens): 0.4380 -> predicted 74.1 HellaSwag via the
+# validated -26.4 pt/unit fixed-budget slope.
+test_only: true
+
+model_name_or_path: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+load_in_4bit: false
+load_in_8bit: false
+trust_remote_code: true
+
+test_speed: false
+real_slim: false
+shrink_gate: false
+
+device: "cuda"
+dtype: "bf16"
+use_wandb: true
+wandb_project: "yequan26-a100-qwen3-30b-eval"
+wandb_name: "qwen3_30b_a3b_wsp_rect_hellaswag"
+
+num_workers: 0
+
+eval_sample_limit: -1
+eval_split: "test"
+per_device_eval_batch_size: 4
+batch_size: 16
+num_fewshot: 0
+
+prune_kwargs:
+  prune_ratio: 0.875
+  dynamic_alloc:
+    enabled: true
+    criterion: "weight_sparse"
+    k_min: 0
+    wsparse:
+      # the simplest unstructured read set: a fixed rectangle. The token's top-25%
+      # coordinates by |x| are read for the top-45% of channels by |W| in each of
+      # those columns (per-column thresholds, so no index is stored). Same density
+      # as input_sparse at rho_input=0.1125, one masked GEMM, 1 bit/weight of
+      # positional metadata.
+      alloc_mode: "rank"
+      levels: "0.25x0.45"
+      rho_channel: 0.125
+      use_gate: true
+      input_alloc: "uniform"
+
+eval_task_names: "hellaswag"
+output_dir: ./results_eval/qwen3_30b_a3b_wsp_rect_hellaswag
+scores_dir: /home/ubuntu/yequan/moe-compression/results/Qwen_Qwen3-30B-A3B-Thinking-2507/c4/scores
+
+attn_implementation: "sdpa"

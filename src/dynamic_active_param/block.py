@@ -35,6 +35,8 @@ The block reads per-layer state attached at install time:
     self._dyn_pub_*    pubsub artifact tensors (pubsub)
     self._dyn_sc_up    LowRankScorer for up_proj    (lowrank_scorer)
     self._dyn_sc_gate  LowRankScorer for gate_proj  (lowrank_scorer; None => up-only)
+    self._dyn_probe    SparseProbe                  (sparse_probe / input_sparse)
+    self._dyn_wsparse  WeightSparseProbe            (weight_sparse; unstructured)
     self._dyn_B        int             total kept channels per token
     self._dyn_k_min    int             per-expert floor
     self._dyn_I        int             per-expert cap (moe_intermediate_size)
@@ -57,6 +59,10 @@ from src.dynamic_active_param.sparse_probe import (
     probe_expert_scores,
     sparsify_input_by_count,
     sparsify_input_topk,
+)
+from src.dynamic_active_param.weight_sparse import (
+    wsparse_expert_scores,
+    wsparse_layer_bands,
 )
 
 __all__ = ["dynamic_moe_block_forward"]
@@ -85,7 +91,31 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
     # sparse_probe ranks by a low-precision / input-sparse proxy, also a (K, I)
     # tensor computed from the hidden state alone.
     need_probe = self._dyn_criterion == "sparse_probe"
+    # weight_sparse ranks by an *unstructured* (entry-level) sparse proxy: the read
+    # budget is spent on (channel, coordinate) pairs, not whole coordinates. Same
+    # (K, I) proxy tensor, and the same masking simulation.
+    need_wsp = self._dyn_criterion == "weight_sparse"
     probe_ranks = probe_nkeep = hidden_sp = None
+    wsp_lvl_u = wsp_lvl_g = None
+    if need_wsp:
+        wsp = self._dyn_wsparse
+        # Coordinate order is a property of the token (shared by its K experts and
+        # both branches), so sort once per token — on the *centered* input when the
+        # mean-fix is on, since that is what the sparse reads then estimate.
+        d = (hidden_states if wsp.mu is None
+             else hidden_states - wsp.mu.to(device=device, dtype=dtype))
+        probe_ranks, sorted_abs = descending_abs_ranks(d)
+        probe_nkeep = (
+            allocate_input_reads(sorted_abs, routing_weights, wsp.alloc_keep,
+                                 _ALLOC_BETA.get(wsp.input_alloc, 1.0))
+            if wsp.input_alloc != "uniform" else None
+        )
+        if wsp.alloc_mode == "tau":
+            # One batched bisection for the whole layer: the per-token threshold
+            # depends on the token and its expert choice, not on the expert loop,
+            # and resolving it per expert instead is ~50x slower (launch-bound).
+            wsp_lvl_u, wsp_lvl_g = wsparse_layer_bands(
+                sorted_abs, wsp, selected_experts, n_cols=probe_nkeep)
     if need_probe:
         probe = self._dyn_probe
         alloc = getattr(probe, "input_alloc", "uniform")
@@ -116,7 +146,7 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
     inter_all = torch.zeros((T, K, I), dtype=dtype, device=device)
     up_all = torch.zeros((T, K, I), dtype=dtype, device=device) if need_up else None
     proxy_all = (torch.zeros((T, K, I), dtype=torch.float32, device=device)
-                 if (need_proxy or need_probe) else None)
+                 if (need_proxy or need_probe or need_wsp) else None)
     expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
     expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
     for expert_idx in expert_hit:
@@ -162,6 +192,19 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
                     probe_nkeep[top_x, idx],
                 )
             proxy_all[top_x, idx] = probe_expert_scores(cur_sp, probe, eid)
+        if need_wsp:
+            # Unstructured proxy: per level, the coordinates in that band are read
+            # for only the channels whose |W| is above the level's per-column
+            # threshold. As with the other proxies this runs *before* the full
+            # gate/up above in a realized implementation, so all three matrices are
+            # gathered to the kept channels; the masking simulation keeps the
+            # arithmetic identical and changes only the accounting.
+            proxy_all[top_x, idx] = wsparse_expert_scores(
+                hidden_states[top_x], wsp, eid, ranks=probe_ranks[top_x],
+                n_cols=None if probe_nkeep is None else probe_nkeep[top_x, idx],
+                lvl_u=None if wsp_lvl_u is None else wsp_lvl_u[top_x, idx],
+                lvl_g=None if wsp_lvl_g is None else wsp_lvl_g[top_x, idx],
+            )
 
     if self._dyn_criterion == "channel_router":
         # The learned channel router (and, through the same object, the exact-oracle
@@ -196,6 +239,15 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
         score = g.unsqueeze(-1) * proxy_all
         keep = select_global_topB(score, self._dyn_B)
         return inter_all, keep
+
+    if self._dyn_criterion == "weight_sparse":
+        # Rank by g_e * |SiLU(gate_hat) * up_hat| from an unstructured read set —
+        # (channel, coordinate) entries chosen by the |W_ji|*|x_i| product rather
+        # than whole coordinates. Same decision point as sparse_probe: before any
+        # full-width matmul, so all three matrices are gathered to the kept
+        # channels (see weight_sparse.report_wsparse_accounting).
+        g = routing_weights.to(torch.float32)                  # (T, K)
+        return inter_all, select_global_topB(g.unsqueeze(-1) * proxy_all, self._dyn_B)
 
     if self._dyn_criterion == "sparse_probe":
         # Rank by g_e * |SiLU(gate_hat) * up_hat| from b-bit weights read on the

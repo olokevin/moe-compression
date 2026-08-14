@@ -183,7 +183,7 @@ def main(args, model, tokenizer):
 
         if criterion in (
             "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-            "sparse_probe",
+            "sparse_probe", "weight_sparse",
         ):
             pubsub_artifact = None
             scorer_kwargs = None
@@ -260,6 +260,48 @@ def main(args, model, tokenizer):
                     f"use_gate={scorer_kwargs['use_gate']}, lam={scorer_kwargs['lam']}, "
                     f"input_alloc={scorer_kwargs['input_alloc']})"
                 )
+            elif criterion == "weight_sparse":
+                # Unstructured (entry-level) sparse proxy: the scoring budget buys
+                # (channel, coordinate) pairs instead of whole coordinates. The
+                # staircase spec is the only real knob —
+                #   "0.1125x1.0"        == input_sparse at rho_input=0.1125
+                #   "1.0x0.1125"        == a static per-column-balanced weight mask
+                #   "0.0625x1.0+0.25x0.2" == a two-band graded read set
+                # all three at the SAME per-branch read density (see
+                # weight_sparse.levels_density), which is what makes them iso-cost.
+                sc = dynamic_alloc_cfg.get("wsparse", {}) or {}
+                if sc.get("rho_channel") is not None:
+                    prune_ratio = 1.0 - float(sc["rho_channel"])
+                # In the threshold mode the column widths float, so the config only
+                # needs the row_frac ladder: accept it as a plain list.
+                _levels = sc.get("levels")
+                if _levels is None and sc.get("row_fracs"):
+                    _levels = tuple((0.0, float(rf)) for rf in sc["row_fracs"])
+                scorer_kwargs = {
+                    "levels": _levels if _levels is not None else "0.25x0.45",
+                    "use_gate": bool(sc.get("use_gate", True)),
+                    "input_alloc": str(sc.get("input_alloc", "uniform")),
+                    "mean_path": sc.get("mean_path"),
+                    "compute_device": sc.get("compute_device"),
+                    # alloc_mode="tau" lets the band widths float per token under
+                    # one budget-exact |W_ji*x_i| threshold; `density` is then the
+                    # per-branch read budget and the levels supply only the
+                    # row_frac ladder.
+                    "alloc_mode": str(sc.get("alloc_mode", "rank")),
+                    "density": sc.get("density"),
+                    "tau_iters": int(sc.get("tau_iters", 16)),
+                    "count_reads": bool(sc.get("count_reads", True)),
+                }
+                _print(
+                    f"\n[Step 3] Dynamic allocation (criterion=weight_sparse, "
+                    f"levels={scorer_kwargs['levels']}, "
+                    f"alloc_mode={scorer_kwargs['alloc_mode']}, "
+                    f"density={scorer_kwargs['density']}, "
+                    f"rho_channel={1.0 - prune_ratio:.4f}, "
+                    f"use_gate={scorer_kwargs['use_gate']}, "
+                    f"input_alloc={scorer_kwargs['input_alloc']}, "
+                    f"mean_path={scorer_kwargs['mean_path']})"
+                )
             else:
                 _print(f"\n[Step 3] Dynamic allocation (criterion={criterion})")
             model = install_dynamic_alloc(
@@ -270,6 +312,32 @@ def main(args, model, tokenizer):
             _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
             _print(f"\n[Step 6] Start evaluation...")
             results = eval_dispatch(args, model, tokenizer, verbose=True)
+            if criterion == "weight_sparse":
+                # The claim is an active-parameter claim, so verify the realized
+                # read budget over the eval stream rather than trusting the config
+                # (the threshold mode floats the read set per token).
+                from src.base.shared_utils.safe_isinstance import (
+                    _get_experts, _get_moe_block, _get_num_hidden_layers,
+                )
+                tot, cnt = 0.0, 0
+                for li in range(_get_num_hidden_layers(model)):
+                    blk = _get_moe_block(model, li)
+                    if _get_experts(blk) is None:
+                        continue
+                    wsp = getattr(blk, "_dyn_wsparse", None)
+                    if wsp is not None and wsp.reads_n:
+                        tot += wsp.reads_sum / wsp.reads_n
+                        cnt += 1
+                if cnt:
+                    d = tot / cnt
+                    n_mat = 2 if scorer_kwargs["use_gate"] else 1
+                    _print(
+                        f"[Step 6] realized scoring density over the eval stream: "
+                        f"{d:.4f}/branch (target {wsp.density:.4f}) -> used params "
+                        f"{(1.0 - prune_ratio) + n_mat * d / 3:.4f} "
+                        f"(cut {100 * (1 - ((1.0 - prune_ratio) + n_mat * d / 3)):.1f}%), "
+                        f"mean over {cnt} MoE layers"
+                    )
             _print(f"[Step 6] ✅ Evaluation results: {results}")
             return
 
