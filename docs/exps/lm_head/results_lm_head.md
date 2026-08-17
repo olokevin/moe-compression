@@ -31,7 +31,13 @@ calibration cost beyond counting tokens.
 | | verdict |
 |---|---|
 | **Low-rank heads** (F2) | **Dead, confirmed.** +157% PPL at 25% storage, vs +4.2% for INT4. The plan's kill criterion was "within +5%". |
-| **Sparse activation** (B1-a) | **Dead on perplexity.** Reading 2.7% of rows makes 20.1% of target tokens unreachable — perplexity is literally infinite. Even reading 21.6% of rows with a proper tail fallback costs +117%. |
+| **Sparse activation** (B1-a) | **Dead, and worse than the plan expected.** Perplexity is literally infinite (20.1% of targets unreachable at 2.7% of rows), *and* HellaSwag collapses to chance — **78.57 → 25.67** on the 30B. |
+
+⚠️ **One plan assumption did not survive contact.** Plan §3 predicted that HellaSwag and
+MMLU would both be blind to a sparse head. **MMLU is** (bit-identical, 47.18 → 47.18).
+**HellaSwag is not** — its endings average 13.7 tokens, so only 9.35% of them are fully
+inside a top-4096 tier, and the other 91% score −inf. It is a *valid* detector of
+sparse-head damage. Details in [§ Sparse activation](#sparse-activation-b1-a--why-it-fails).
 
 **Where sophistication clearly pays:** below ~4 bits. At 15% storage ARCHead's
 activation-metric correction is worth **3.5× lower perplexity** than fitting the same
@@ -148,22 +154,28 @@ so these are savings against the *untied* model, not against the shipped checkpo
 
 ---
 
-### Downstream tasks confirm §3's warning
+### Downstream tasks
 
 Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B.
 
-| run | store% | Δactive | HellaSwag acc_norm | MMLU acc (5-shot) |
-|---|---|---|---|---|
-| dense BF16 | 100.00 | — | 47.29 | 47.18 |
-| B1-s T=4096, tail 4b | 27.78 | −14.95% | 47.02 | **47.18** |
-| B2 ARCHead | 27.28 | −15.05% | 47.33 | *(running)* |
+| run | store% / read% | Δactive | HellaSwag acc_norm | Δ | MMLU acc (5-shot) | Δ |
+|---|---|---|---|---|---|---|
+| dense BF16 | 100.00 | — | 47.29 | — | 47.18 | — |
+| B2 ARCHead | 27.28 | −15.05% | **47.33** | +0.04 | **47.25** | +0.07 |
+| B1-s T=4096, tail 4b | 27.78 | −14.95% | 47.02 | −0.27 | **47.18** | **0.00** |
+| F3 RTN 4-bit g128 | 25.78 | −15.36% | 46.96 | −0.33 | 46.82 | −0.36 |
+| B3 RVQ 1.58 b/w | 9.88 | −18.65% | 45.69 | −1.60 | 45.10 | −2.08 |
+| B1-a T=4096 strict | 100 / 2.70 | −20.14% | **25.48** | **−21.81** | 47.18 | 0.00 |
+| B1-a T=4096, uniform fallback | 100 / 2.70 | −20.14% | **29.02** | **−18.27** | 47.18 | 0.00 |
 
-Cutting the head to ~28% of BF16 moves HellaSwag by **−0.27 / +0.04 pt** and MMLU by
-**0.00 pt** — MMLU is *bit-identical*. This is plan §3's point made concrete: both are
-loglikelihood tasks over high-frequency target tokens, so they are nearly blind to head
-approximation. They are the right tasks for the pre-registered bar and the wrong ones for
-choosing a method. C4 perplexity, which separates these same three heads by 1.1 / 1.3 /
-4.2%, is what actually discriminates.
+At ~27% storage all three real methods are inside noise on both tasks (≤0.36 pt), so the
+tasks confirm the head treatment is harmless but cannot rank the methods — C4 perplexity,
+which separates these same heads by 1.1 / 1.3 / 4.2%, is what discriminates. RVQ at 9.9%
+storage is the first row that shows real task damage (−1.6 / −2.1 pt), consistent with its
+1.76× perplexity.
+
+The last two rows are the interesting ones and are discussed below: **MMLU is bit-identical
+while HellaSwag falls to chance**, on the same head.
 
 ---
 
@@ -189,7 +201,13 @@ the shortlist."** It lands at **+157%**, against +4.2% for storage-matched INT4 
 Two secondary facts: **whitening is mandatory** (96× better at r=256 — plain SVD of an
 lm_head is catastrophic), and even at 75% storage low-rank still costs +10%.
 
-⚠️ Still 0.6B (`d=1024`). The plan asked for `d=2048`; that awaits the 30B arm.
+**At `d=2048` (the 30B, the replication the plan asked for)** the first data point is
+already damning: rank-512 at **25.34% storage gives 55.3% top-1 agreement**, against
+**96.0%** for B1-s and **83.5%** for plain INT4 at the same storage. Perplexities are
+still running (`lm_head_sweep_30b_f2.json`), but no method with barely half the dense
+argmaxes recovers a +5% perplexity bound. Runnable through the standard path now:
+`method: lowrank` with `rank_frac` (a fraction of `d`, so one variant means the same
+storage point on any model).
 
 ---
 
@@ -215,13 +233,40 @@ reason.
 The graded version is no kinder: give the whole tail one shared logit (classic tiered
 softmax) and even a 21.6% read set costs **+117%**.
 
-**HellaSwag and MMLU cannot see any of this** — their targets (" A".." D", short common
-endings) sit inside every tier, so a sparse-activation head scores at dense level on both
-while being unable to write English. Measured above: MMLU moves 0.00 pt under a head
-treatment that C4 separates cleanly. C4 PPL was correctly made mandatory.
-
 The 30B behaves the same way: 16.79% of dense mass outside the top-4096 tier, C4
 perplexity **∞**.
+
+### Correcting plan §3: HellaSwag *does* detect this, MMLU does not
+
+Plan §3 predicted both benchmarks would be blind, because "those target tokens are all
+high-frequency, so they sit inside **any** frequency-tiered read set". Half of that is
+right. Measured with T=4096:
+
+| | 30B | 0.6B |
+|---|---|---|
+| **HellaSwag** acc_norm, dense → B1-a | 78.57 → **25.67** | 47.29 → **25.48** |
+| **MMLU** acc, dense → B1-a | *(running)* | 47.18 → **47.18** (identical) |
+
+HellaSwag collapses to **chance** (25%). The mechanism, measured with nothing but the
+tokenizer (`scripts/lm_head_task_coverage.py`):
+
+| T | HellaSwag: target tokens in tier | **endings *fully* in tier** | MMLU: targets in tier |
+|---|---|---|---|
+| 4 096 | 82.96% | **9.35%** | 100% |
+| 8 192 | 89.74% | 25.20% | 100% |
+| 16 384 | 95.29% | 53.73% | 100% |
+| 32 768 | 98.85% | 85.95% | 100% |
+
+HellaSwag endings average **13.7 tokens**. A strict head scores an ending at −inf unless
+*every* token is in-tier, so what its accuracy tracks is the "fully covered" column —
+9.35% at T=4096. With ~91% of all four candidates at −inf, `acc_norm` is picking among
+ties, hence chance. MMLU's targets are single tokens (" A".." D"), in-tier at every size,
+so its score is bit-identical.
+
+So: **multi-token-continuation tasks are valid detectors of sparse-head damage;
+single-token-answer tasks are not.** The practical upshot for the plan is stronger than it
+assumed — C4 PPL is still mandatory, but HellaSwag corroborates it for free, and a
+sparse-head result that shows dense-level *MMLU* alone should be treated as no evidence.
 
 ### Correcting the inherited numbers
 
@@ -293,40 +338,52 @@ Confirmed before trusting §1's accounting: `vocab_size=151936`, `hidden_size=20
 active** (measured active = **3.353 B**, the plan's figure exactly). Not tied, so no
 untie step.
 
-lm-eval `word_perplexity` on C4 (500 docs), dense reference **25.349**. `Δactive` is
-against 3.353 B; the second figure is against the post-−73%-expert-pruning active budget,
-where the head's share rises to 15.41%.
+lm-eval `word_perplexity` on C4 (500 docs) and full HellaSwag 0-shot. `Δactive` is
+against 3.353 B; the parenthesised figure is against the post-−73%-expert-pruning active
+budget, where the head's share rises to 15.41%.
 
-| run | store% | Δactive | Δactive (post-prune) | top-1 agr | **C4 wppl** | rel |
-|---|---|---|---|---|---|---|
-| dense BF16 | 100.00 | — | — | — | 25.349 | 1.000 |
-| **B2** ARCHead (rc10 rr6 g64 p.75) | 26.92 | **−6.78%** | −11.26% | 93.31% | **25.676** | **1.013** |
-| **B1-s** T=4096, tail 4b | 27.78 | −6.70% | −11.13% | **96.00%** | **25.827** | **1.019** |
-| F3 RTN 4-bit g128 *(naive floor)* | 25.78 | −6.89% | −11.44% | 83.54% | 27.820 | 1.098 |
-| B1-a T=4096 strict *(sparse)* | 100 (2.70 read) | −9.03% | −15.00% | 87.11% | ∞ | — |
+Our dense HellaSwag comes out at **78.57**, matching the repo's standing 78.56 reference —
+a useful check that the harness and protocol are the same ones the plan's bar was set in.
 
-**The scale story.** On the 30B, ARCHead's ordering versus the free prior **reverses**
-relative to the 0.6B: it wins by 0.6 pp instead of losing by 0.2. Both still clear
-uniform INT4 by a wide margin, and that margin is what grew — INT4 costs +9.7% here
-against +4.2% on the 0.6B. So the larger head is *harder* to quantize uniformly and
-*more* rewarding to treat structurally, whether structurally means "protect the frequent
-rows" or "correct the dominant activation directions". Our ARCHead rel PPL of **1.013 at
-26.9%** sits close to the paper's **1.007 at 25.6%** on Qwen3-8B-Base, and its
-storage-matched-INT4 comparison (1.14–1.16) brackets our 1.098 — the reproduction is in
-family.
+| run | store% | Δactive | top-1 agr | **C4 wppl** | rel | **HellaSwag** | Δ |
+|---|---|---|---|---|---|---|---|
+| dense BF16 | 100.00 | — | — | 25.349 | 1.000 | 78.57 | — |
+| **B2** ARCHead (rc10 rr6 g64 p.75) | 26.92 | **−6.78%** (−11.26%) | 93.31% | **25.676** | **1.013** | **78.48** | **−0.09** |
+| **B1-s** T=4096, tail 4b | 27.78 | −6.70% (−11.13%) | **96.00%** | **25.827** | **1.019** | **78.34** | **−0.23** |
+| F3 RTN 4-bit g128 *(naive floor)* | 25.78 | −6.89% (−11.44%) | 83.54% | 27.820 | 1.098 | 77.66 | −0.91 |
+| B2 ARCHead, *no* activation metric | 26.92 | −6.78% | 85.69% | 27.151 | 1.071 | — | — |
+| B1-s T=4096, tail 2b | 15.62 | −7.83% | 71.73% | 113.728 | 4.487 | — | — |
+| B3 RVQ 1.58 b/w | 9.88 | −8.36% | 45.26% | 103.394 | 4.079 | — | — |
+| B1-a T=4096 strict *(sparse)* | 100 (2.70 read) | −9.03% (−15.00%) | 87.11% | **∞** | — | **25.67** | **−52.90** |
+| B1-a T=4096, uniform fallback | 100 (2.70 read) | −9.03% | — | 126 362 | 4984 | — | — |
+| B1-p T=8192 *(tail pruned)* | 5.39 | −8.78% | 91.46% | **∞** | — | — | — |
+| B3 VQ-Logits K=1024 | 0.70 | −9.21% | 0.24% | 114 522 | 4517 | — | — |
 
-B1-a's sparse-activation row behaves as on the 0.6B: 16.79% of the dense probability
-mass falls outside the top-4096 tier, and strict-mode perplexity is infinite.
+### What the 30B adds
 
-**Still in flight** (~16 min/variant): the remaining 6 C4 variants (`b1a_t4k_fb`,
-`b1s_t4k_tail2`, `b2_25_nometric`, `b3_rvq15`, `b1p_t8k`, `b3_vql`) and then full
-HellaSwag for the headline five, against the dense 78.56 reference. On A100-Sagemaker at
-`results_eval/lm_head_sweep_30b_{c4,hellaswag}.json`; read with
-`.venv/bin/python scripts/show_sweep.py <path>`.
+1. **The ordering reverses versus the 0.6B.** ARCHead wins by 0.6 pp here instead of
+   losing by 0.2. Both still clear uniform INT4 by a wide margin, and that margin *grew*:
+   INT4 costs +9.7% here against +4.2% on the 0.6B. The larger head is harder to quantize
+   uniformly and more rewarding to treat structurally.
+2. **Our ARCHead reproduction lands in family.** Rel PPL **1.013 at 26.9%** against the
+   paper's **1.007 at 25.6%** on Qwen3-8B-Base, and our storage-matched INT4 (1.098) sits
+   just under the 1.14–1.16 the paper reports for that comparison.
+3. **The activation metric is worth much more at scale.** Ablating it costs
+   1.013 → 1.071 (+5.7 pp of relative PPL) versus +2.3 pp on the 0.6B, and drops top-1
+   agreement 93.3% → 85.7%.
+4. **Everything below ~26% storage degrades far harder than on the 0.6B.** B1-s at 15.6%
+   is rel 4.49 (0.6B: 2.46); RVQ at 1.58 b/w is rel 4.08 (0.6B: 1.76). The 30B head is
+   markedly less compressible in relative terms, so SLM results do **not** extrapolate
+   down-bits to the large model.
+5. **VQ-Logits is destroyed** — 0.24% top-1 agreement, i.e. it retains essentially nothing.
 
-Batch sizes are reduced (c4=2, hellaswag=8) to fit 61 GB of weights plus the
-`[bs, 2048, 151936]` logits tensor into the 80 GB of exclusively-free GPU. Both metrics
-are computed per request, so this changes speed only, not the numbers.
+Batch sizes were reduced (c4=2, hellaswag=8) so 61 GB of weights plus the
+`[bs, 2048, 151936]` logits tensor fit the free GPUs. Both metrics are computed per
+request, so this changes speed only, not the numbers.
+
+**Still running:** F2's low-rank ladder at `d=2048` (the plan's risk-3 guard) and the MMLU
+column, both on A100-Sagemaker with 4 GPUs —
+`results_eval/lm_head_sweep_30b_{f2,mmlu}.json`, read with `scripts/show_sweep.py`.
 
 ---
 

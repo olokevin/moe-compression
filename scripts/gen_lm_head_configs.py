@@ -56,6 +56,14 @@ VARIANTS = {
     # --- F3: the honest naive floor ---------------------------------------- #
     "f3_rtn4":        dict(method="rtn", bits=4, group=128),
     "f3_rtn3":        dict(method="rtn", bits=3, group=128),
+    # --- F2: the low-rank ladder (the exclusion the plan wants guarded) ----- #
+    # rank_frac is a fraction of D, so each name denotes the same ~25/50/75%-of-BF16
+    # storage point on every model (rank = frac * D => 16*(V+D)*frac*D/(V*D) bits,
+    # which is ~4*frac*16 for V >> D).
+    "f2_lr25":        dict(method="lowrank", rank_frac=0.25, whiten=True),
+    "f2_lr50":        dict(method="lowrank", rank_frac=0.50, whiten=True),
+    "f2_lr75":        dict(method="lowrank", rank_frac=0.75, whiten=True),
+    "f2_lr25_plain":  dict(method="lowrank", rank_frac=0.25, whiten=False),
 }
 
 # Phase 5 -- the best head method composed with the repo's -73% expert config.
@@ -164,6 +172,7 @@ def main():
         calib = "./calib/lm_head_qwen3_0_6b"
         variants = ["b1s_t4k_tail4", "b1a_t4k", "b1a_t4k_fb", "b2_25", "f3_rtn4",
                     "b3_rvq15", "b3_vql"]
+        variants += ["f2_lr25", "f2_lr50", "f2_lr75", "f2_lr25_plain"]
     else:
         model = "Qwen/Qwen3-30B-A3B-Thinking-2507"
         prefix = "qwen3_30b_a3b"

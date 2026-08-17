@@ -26,7 +26,14 @@ __all__ = [
     "quantize_int8_rowwise",
     "metric_transform",
     "randomized_svd",
+    "build_lowrank",
+    "lowrank_bits_per_weight",
 ]
+
+
+def lowrank_bits_per_weight(V: int, D: int, rank: int, factor_bits: int = 16) -> float:
+    """Bits/weight of an ``(V,r) @ (r,D)`` factorization, per dense element."""
+    return float(factor_bits) * (V + D) * rank / float(V * D)
 
 
 def bits_per_weight(bits: int, group: int, scale_bits: int = 16) -> float:
@@ -138,3 +145,57 @@ def randomized_svd(
     U, S, V = torch.svd_lowrank(A.float(), q=q, niter=int(n_iter))
     r = int(min(rank, S.numel()))
     return U[:, :r], S[:r], V[:, :r].T
+
+
+@torch.no_grad()
+def build_lowrank(
+    W: torch.Tensor,
+    C: Optional[torch.Tensor] = None,
+    rank: int = 512,
+    whiten: bool = True,
+    p: float = 0.5,
+    ridge: float = 1e-3,
+    compute_device: str = "cpu",
+):
+    """F2 -- the low-rank head ladder. Returns ``(W_hat, stats)``.
+
+    ``whiten=True`` fits in the activation metric (minimize ``||(W-W_hat) T_p||_F``,
+    ``p=1/2`` so the objective *is* the damped logit MSE); ``whiten=False`` is a plain
+    SVD of ``W``. The plain form is catastrophic on an lm_head -- ~96x worse than the
+    whitened one -- so the ladder always reports both, or the exclusion looks like it
+    might just be a bad implementation.
+    """
+    dev = compute_device
+    Wf = W.detach().to(device=dev, dtype=torch.float32)
+    V, D = Wf.shape
+    if whiten:
+        if C is None:
+            raise ValueError("build_lowrank(whiten=True) needs the activation metric C")
+        Tp, Tp_inv, _ = metric_transform(C, p=p, ridge=ridge, compute_device=dev)
+        U, S, Vh = randomized_svd(Wf @ Tp.to(dev), rank=rank)
+        W_hat = (U * S.unsqueeze(0)) @ (Vh @ Tp_inv.to(dev))
+    else:
+        U, S, Vh = randomized_svd(Wf, rank=rank)
+        W_hat = (U * S.unsqueeze(0)) @ Vh
+    stats = {
+        "rank": int(rank), "whitened": bool(whiten),
+        "bits_per_weight": lowrank_bits_per_weight(V, D, rank),
+        "storage_frac_of_bf16": lowrank_bits_per_weight(V, D, rank) / 16.0,
+        "rel_fro_err": float((W_hat - Wf).norm() / Wf.norm().clamp_min(1e-30)),
+    }
+    if C is not None:
+        Cd = C.to(device=dev, dtype=torch.float32)
+        Dm = W_hat - Wf
+        stats["rel_metric_err"] = float(
+            (((Dm @ Cd) * Dm).sum().clamp_min(0).sqrt()
+             / ((Wf @ Cd) * Wf).sum().clamp_min(1e-30).sqrt())
+        )
+    _print(
+        f"[lm_head/F2 lowrank] rank={rank} whitened={whiten} -> "
+        f"{stats['bits_per_weight']:.3f} bits/weight "
+        f"({100 * stats['storage_frac_of_bf16']:.2f}% of BF16); "
+        f"rel err Frobenius {stats['rel_fro_err']:.4f}"
+        + (f", in the C metric {stats['rel_metric_err']:.4f}"
+           if "rel_metric_err" in stats else "")
+    )
+    return W_hat.to(W.dtype), stats

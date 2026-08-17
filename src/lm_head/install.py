@@ -26,7 +26,7 @@ from src.lm_head.tiering import build_tiers, tier_stats
 
 __all__ = ["install_lm_head"]
 
-_METHODS = ("freq_tier", "archead", "rvq", "vq_logits", "rtn")
+_METHODS = ("freq_tier", "archead", "rvq", "vq_logits", "rtn", "lowrank")
 
 
 def _get_input_embedding(model):
@@ -262,6 +262,8 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
                    ", ".join(f"T={t}: {100 * m:.2f}%" for t, m in cov.items()))
     C = H = None
     needs_sigma = method in ("archead",) or (
+        method == "lowrank" and cfg.get("whiten", True)
+    ) or (
         method in ("rvq", "vq_logits") and cfg.get("activation_metric", True)
     )
     if needs_sigma or cfg.get("diagnostics", True):
@@ -320,6 +322,25 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
         )
         store_bpw = bits_per_weight(bits, group)
         stats.update({"bits": bits, "group": group})
+
+    elif method == "lowrank":  # F2 -- the low-rank ladder
+        from src.lm_head.quant import build_lowrank
+        # rank_frac is a fraction of D, so one variant means the same storage point on
+        # every model. An absolute `rank` from a d=2048 config silently becomes a
+        # *different* storage point on a d=1024 head, which is how "lr25" ended up
+        # meaning 50% there.
+        if cfg.get("rank_frac") is not None:
+            _rank = max(1, int(round(float(cfg["rank_frac"]) * D)))
+        else:
+            _rank = int(cfg.get("rank", D // 2))
+        W_hat, s = build_lowrank(
+            W_cpu, C, rank=_rank,
+            whiten=bool(cfg.get("whiten", True)),
+            p=float(cfg.get("metric_power", 0.5)), ridge=float(cfg.get("ridge", 1e-3)),
+            compute_device=compute_device,
+        )
+        store_bpw = s["bits_per_weight"]
+        stats.update(s)
 
     elif method == "archead":
         from src.lm_head.archead import build_archead
