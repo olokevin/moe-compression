@@ -238,6 +238,45 @@ def test_accounting_analytic_byte_count():
     print("  ✅ gate 0b: head_cost matches hand-computed bytes for BF16 / INT4 / B1-a")
 
 
+def test_accounting_separates_params_from_bytes():
+    """Parameter count and precision are independent axes. Quantization must move
+    ONLY the byte axis; structural methods must move the parameter axis."""
+    V_, D_ = 151936, 2048
+    dense = V_ * D_
+
+    # pure quantization: same parameter count, fewer bits
+    q = head_cost(V_, D_, bits_per_weight(4, 128))
+    assert q["stored_params"] == dense and q["read_params_per_token"] == dense
+    assert q["stored_param_frac"] == 1.0 and q["read_param_frac"] == 1.0
+    assert abs(q["storage_frac_of_bf16"] - 4.125 / 16) < 1e-12
+
+    # row pruning (B1-p): T*D parameters, BF16
+    T = 8192
+    p = head_cost(V_, D_, 16.0 * T / V_, read_rows=T, read_bits_per_weight=16.0,
+                  stored_params=T * D_)
+    assert p["stored_params"] == T * D_
+    assert abs(p["stored_param_frac"] - T / V_) < 1e-12
+    assert abs(p["read_param_frac"] - T / V_) < 1e-12
+
+    # sparse activation (B1-a): all params stored, T*D read
+    a = head_cost(V_, D_, 16.0, read_rows=T, read_bits_per_weight=16.0)
+    assert a["stored_param_frac"] == 1.0
+    assert abs(a["read_param_frac"] - T / V_) < 1e-12
+
+    # low-rank: (V+D)*r parameters, none of them a row subset
+    r = 512
+    lr = head_cost(V_, D_, 16.0 * (V_ + D_) * r / dense,
+                   stored_params=(V_ + D_) * r, read_params=(V_ + D_) * r)
+    assert lr["stored_params"] == (V_ + D_) * r
+    assert abs(lr["stored_param_frac"] - (V_ + D_) * r / dense) < 1e-12
+    # for BF16 factors the parameter fraction and the byte fraction coincide
+    assert abs(lr["stored_param_frac"] - lr["storage_frac_of_bf16"]) < 1e-9
+    print(f"  ✅ params and bytes are separate axes: INT4 = 100.00% of params / "
+          f"{100 * q['storage_frac_of_bf16']:.2f}% of bytes; "
+          f"B1-p T=8192 = {100 * p['stored_param_frac']:.2f}% of params; "
+          f"low-rank r=512 = {100 * lr['stored_param_frac']:.2f}% of params")
+
+
 def test_accounting_denominators():
     """The two denominators of plan section 1 must come out at 1.02% / 9.28%."""
     V_, D_ = 151936, 2048
@@ -272,5 +311,6 @@ if __name__ == "__main__":
     test_vq_bits_and_reconstruction()
     test_vq_logits_is_extreme_and_lossy()
     test_accounting_analytic_byte_count()
+    test_accounting_separates_params_from_bytes()
     test_accounting_denominators()
     print("ALL QUANT/ACCOUNTING TESTS PASSED")

@@ -92,16 +92,24 @@ def head_cost(
     storage_bits_per_weight: float,
     read_rows: Optional[int] = None,
     read_bits_per_weight: Optional[float] = None,
+    stored_params: Optional[int] = None,
+    read_params: Optional[int] = None,
 ) -> dict:
-    """Cost of one head treatment, in both axes, as BF16-equivalent params.
+    """Cost of one head treatment on **two independent axes**.
 
-    ``read_rows=None`` means the head is read densely (all ``V`` rows). Setting it
-    to ``T`` is the B1-a case: storage stays at ``V`` rows but only ``T`` rows are
-    touched per token.
+    *Parameter count* -- how many numbers the representation holds
+    (``stored_params``) and how many are touched per token
+    (``read_params_per_token``), each as a fraction of ``V*D``. Quantization does
+    **not** move these: an INT4 head has exactly ``V*D`` parameters. Only structural
+    methods do -- low-rank factors ``(V+D)*r``, dropped rows ``T*D``, unread rows.
 
-    "BF16-equivalent params" divides bytes by 2, so the number is directly
-    comparable against a parameter count -- which is what the active-param
-    denominator is measured in.
+    *Precision / bytes* -- ``storage_bits_per_weight`` and the derived byte figures,
+    which is where quantization's saving lives.
+
+    ``read_rows=None`` means the head is read densely. Setting it to ``T`` is the
+    B1-a case: storage stays at ``V`` rows but only ``T`` rows are touched per token.
+    ``stored_params`` / ``read_params`` override the counts for methods whose
+    representation is not a row subset (low-rank, codebooks).
     """
     dense_params = V * D
     dense_bytes = dense_params * 2.0
@@ -109,9 +117,24 @@ def head_cost(
     rb = storage_bits_per_weight if read_bits_per_weight is None else read_bits_per_weight
     rows = V if read_rows is None else int(min(read_rows, V))
     read_bytes = rows * D * rb / 8.0
+
+    # --- axis 1: PARAMETER COUNT (how many numbers exist / are touched) ------ #
+    # Kept strictly separate from bytes, because the two axes answer different
+    # questions and mixing them flatters quantization: an INT4 head stores exactly
+    # as many parameters as a BF16 one, just narrower. Only structural methods
+    # (low-rank factors, dropped rows, unread rows) change these counts.
+    n_stored = dense_params if stored_params is None else int(stored_params)
+    n_read = (rows * D) if read_params is None else int(read_params)
+
     return {
         "V": V, "D": D,
         "dense_params": dense_params,
+        # parameter-count axis
+        "stored_params": n_stored,
+        "read_params_per_token": n_read,
+        "stored_param_frac": n_stored / dense_params,
+        "read_param_frac": n_read / dense_params,
+        # byte / precision axis
         "dense_bytes": dense_bytes,
         "storage_bits_per_weight": float(storage_bits_per_weight),
         "storage_bytes": store_bytes,
@@ -119,9 +142,9 @@ def head_cost(
         "read_rows": rows,
         "read_bytes_per_token": read_bytes,
         "read_frac_of_bf16": read_bytes / dense_bytes,
-        # The primary efficiency axis of the plan's frontier table. For a
-        # memory-bound decode the binding constraint is bytes *read*, so the
-        # used-param figure is driven by the read axis.
+        # BF16-equivalent params: bytes re-expressed as a parameter count so a
+        # precision saving can be compared against an active-parameter budget.
+        # NOT a parameter count -- see stored_params / read_params_per_token.
         "used_head_params_bf16eq": read_bytes / 2.0,
         "stored_head_params_bf16eq": store_bytes / 2.0,
     }
@@ -141,6 +164,13 @@ def print_lm_head_accounting(cost: dict, ctx: ActiveParamContext, label: str = "
     out["delta_active_used"] = -saved_used / max(ctx.active_params, 1)
     out["delta_active_stored"] = -saved_stored / max(ctx.active_params, 1)
     out["delta_total_stored"] = -saved_stored / max(ctx.total_params, 1)
+    # true parameter-count deltas (0 for any pure quantization method)
+    out["delta_active_params_stored"] = (
+        -(dense_eq - cost["stored_params"]) / max(ctx.active_params, 1)
+    )
+    out["delta_active_params_read"] = (
+        -(dense_eq - cost["read_params_per_token"]) / max(ctx.active_params, 1)
+    )
     if ctx.active_params_pruned:
         out["head_share_of_active_pruned"] = ctx.head_params / ctx.active_params_pruned
         out["delta_active_pruned_used"] = -saved_used / ctx.active_params_pruned
@@ -152,7 +182,15 @@ def print_lm_head_accounting(cost: dict, ctx: ActiveParamContext, label: str = "
         f"{100 * out['head_share_of_active']:.2f}% of active)"
     )
     _print(
-        f"[lm_head/accounting]   STORAGE {cost['storage_bits_per_weight']:.3f} bits/weight "
+        f"[lm_head/accounting]   PARAMS  stored {cost['stored_params'] / 1e6:.1f}M "
+        f"({100 * cost['stored_param_frac']:.2f}% of {dense_eq / 1e6:.1f}M), "
+        f"read/token {cost['read_params_per_token'] / 1e6:.1f}M "
+        f"({100 * cost['read_param_frac']:.2f}%)"
+        + ("   <- unchanged: this is a precision method, not a structural one"
+           if cost["stored_param_frac"] >= 1.0 and cost["read_param_frac"] >= 1.0 else "")
+    )
+    _print(
+        f"[lm_head/accounting]   BYTES   {cost['storage_bits_per_weight']:.3f} bits/param "
         f"-> {cost['storage_bytes'] / 2**20:.1f} MiB "
         f"({100 * cost['storage_frac_of_bf16']:.2f}% of BF16), "
         f"{stored_eq / 1e6:.1f}M BF16-equiv params"

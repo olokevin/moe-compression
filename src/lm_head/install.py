@@ -279,6 +279,11 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
     stats = {}
     read_rows = None
     read_bpw = None
+    # True parameter counts. None => V*D stored and read_rows*D read, which is right
+    # for row-subset methods and for every pure-precision method. Overridden only by
+    # representations that are not a row subset (low-rank factors, codebooks).
+    n_stored = None
+    n_read = None
 
     if method == "freq_tier":
         tiers = build_tiers(counts, int(cfg.get("tier_size", 4096)), verbose=verbose)
@@ -297,9 +302,11 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
 
         T = tiers.tier_size
         if pruned:
-            # B1-p: only the tier is stored, at head_bits.
+            # B1-p: only the tier is stored, at head_bits. A genuine parameter-count
+            # reduction: T*D numbers instead of V*D.
             store_bpw = bits_per_weight(head_bits, group) * T / V
             read_rows, read_bpw = T, bits_per_weight(head_bits, group)
+            n_stored = T * D
         elif sparse:
             # B1-a: everything stored (head_bits/tail_bits), only the tier read.
             store_bpw = (bits_per_weight(head_bits, group) * T
@@ -340,6 +347,9 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
             compute_device=compute_device,
         )
         store_bpw = s["bits_per_weight"]
+        # Low-rank is the one full-vocabulary method that truly shrinks the parameter
+        # COUNT: (V + D) * r numbers instead of V * D, all of them read every token.
+        n_stored = n_read = (V + D) * _rank
         stats.update(s)
 
     elif method == "archead":
@@ -432,7 +442,8 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
                    else f"uniform tail fallback at logit offset {head._lmh_tail_logit:.3f}")
             )
 
-    cost = head_cost(V, D, store_bpw, read_rows=read_rows, read_bits_per_weight=read_bpw)
+    cost = head_cost(V, D, store_bpw, read_rows=read_rows, read_bits_per_weight=read_bpw,
+                     stored_params=n_stored, read_params=n_read)
     acct = print_lm_head_accounting(cost, ctx, label=method)
     if was_tied and verbose:
         _print(
