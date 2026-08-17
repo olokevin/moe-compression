@@ -13,19 +13,20 @@ or touches — fails:
 
 | method | params stored | params read/token | outcome |
 |---|---|---|---|
-| **low-rank** `(V+D)·r` | 25.3% | 25.3% | **+250% PPL** (bar: +5%) |
-| **row pruning** `T·D` | 21.6% | 21.6% | **−6.7 pt** HellaSwag |
-| **sparse reads** | 100% | **2.7%** | **PPL = ∞** |
+| *dense reference* | *100%* | *100%* | *30B: C4 25.349, HS **78.57**, MMLU **80.94** · 0.6B: C4 31.863, HS **47.29**, MMLU **47.18*** |
+| **low-rank** `(V+D)·r` | 25.3% | 25.3% | **+250% PPL** (bar: +5%); HS 37.80 |
+| **row pruning** `T·D` | 21.6% | 21.6% | HS **40.61** (−6.68); MMLU 47.18 (0.00) |
+| **sparse reads** | 100% | **2.7%** | **PPL = ∞**; HS **25.67** (chance) |
 
 Meanwhile **precision** compression is nearly free. Holding all 311.16 M parameters but
 storing each in ~4.3 bits instead of 16:
 
-| ~4.3 bits/param, 30B | C4 PPL | HellaSwag |
-|---|---|---|
-| dense BF16 (16 bits) | 25.349 | 78.57 |
-| **ARCHead** (4.31 b) | **+1.3%** | **78.48** |
-| **frequency-tiered** (4.44 b) *(free)* | +1.9% | 78.34 |
-| uniform INT4 (4.13 b) | +9.7% | 77.66 |
+| ~4.3 bits/param, 30B | C4 PPL | HellaSwag | MMLU |
+|---|---|---|---|
+| **dense BF16** (16 bits) | **25.349** | **78.57** | **80.94** |
+| **ARCHead** (4.31 b) | **+1.3%** | **78.48** | *(running)* |
+| **frequency-tiered** (4.44 b) *(free)* | +1.9% | 78.34 | *(running)* |
+| uniform INT4 (4.13 b) | +9.7% | 77.66 | *(running)* |
 
 So the head resists having *fewer* numbers and tolerates having *coarser* ones. That
 asymmetry organizes this document: [Part 1](#part-1--reducing-the-parameter-count) covers
@@ -147,20 +148,22 @@ damped logit MSE).
 
 **Qwen3-30B-A3B (`d=2048`)** — the replication plan risk 3 asked for. Dense C4 wppl 25.349:
 
-| rank | params stored | param frac | C4 wppl | rel | top-1 agr |
-|---|---|---|---|---|---|
-| 512 | 78.84 M | **25.34%** | **88.844** | **3.505** | 55.6% |
-| 1024 | 157.68 M | 50.67% | 38.207 | 1.508 | 74.3% |
-| 1536 | 236.52 M | 76.01% | 28.277 | **1.116** | 85.3% |
-| 512, *unwhitened* | 78.84 M | 25.34% | **1.6 × 10⁸** | 6.3 M× | **9.2%** |
+| rank | params stored | param frac | C4 wppl | rel | top-1 agr | HellaSwag | MMLU |
+|---|---|---|---|---|---|---|---|
+| *dense* | *311.16 M* | *100%* | *25.349* | *1.000* | — | ***78.57*** | ***80.94*** |
+| 512 | 78.84 M | **25.34%** | **88.844** | **3.505** | 55.6% | — | — |
+| 1024 | 157.68 M | 50.67% | 38.207 | 1.508 | 74.3% | — | — |
+| 1536 | 236.52 M | 76.01% | 28.277 | **1.116** | 85.3% | — | — |
+| 512, *unwhitened* | 78.84 M | 25.34% | **1.6 × 10⁸** | 6.3 M× | **9.2%** | — | — |
 
 **Qwen3-0.6B (`d=1024`, untied)** — dense C4 PPL 31.863:
 
-| rank | param frac | whitened PPL | rel | unwhitened PPL |
-|---|---|---|---|---|
-| 256 | 25.17% | **81.823** | 2.568 | 7 827 (245.7×) |
-| 512 | 50.34% | 44.700 | 1.403 | 3 593 (112.8×) |
-| 768 | 75.51% | 35.096 | 1.101 | 1 676 (52.6×) |
+| rank | param frac | whitened PPL | rel | unwhitened PPL | HellaSwag | MMLU |
+|---|---|---|---|---|---|---|
+| *dense* | *100%* | *31.863* | *1.000* | — | ***47.29*** | ***47.18*** |
+| 256 | 25.17% | **81.823** | 2.568 | 7 827 (245.7×) | **37.80** (−9.49) | **44.62** (−2.56) |
+| 512 | 50.34% | 44.700 | 1.403 | 3 593 (112.8×) | — | — |
+| 768 | 75.51% | 35.096 | 1.101 | 1 676 (52.6×) | — | — |
 
 **Kill criterion: "if low-rank at 25% storage lands within +5% PPL, it returns to the
 shortlist."** It lands at **+250%** on the 30B and **+157%** on the 0.6B — missed by 50×.
@@ -183,7 +186,9 @@ Stores `T·D` parameters. Frequency is the only usable axis: row norms are near-
 
 | model | T | param frac | Δactive | discarded mass | top-1 agr | C4 PPL | HellaSwag | MMLU |
 |---|---|---|---|---|---|---|---|---|
+| 30B | *dense* | *100%* | — | — | — | *25.349* | ***78.57*** | ***80.94*** |
 | 30B | 8 192 | **5.39%** | −8.78% | 11.09% | 91.46% | **∞** | — | — |
+| 0.6B | *dense* | *100%* | — | — | — | *31.863* | ***47.29*** | ***47.18*** |
 | 0.6B | 32 768 | **21.57%** | −16.24% | **3.08%** | 98.97% | — | **40.61** (−6.68) | **47.18** (0.00) |
 
 Perplexity is **infinite** by construction — a dropped row cannot emit its token — and that
@@ -200,15 +205,21 @@ the one method that separates the two axes: 100% stored, `T·D` read.
 
 **Qwen3-0.6B**, dense PPL 31.863. Reported two ways, because one number alone misleads:
 
-| T | read frac | Δactive (reads) | strict PPL | targets unreachable | uniform tail fallback |
-|---|---|---|---|---|---|
-| 4 096 | **2.70%** | −20.14% | **∞** | **20.09%** | 5 543 (174×) |
-| 8 192 | 5.39% | −19.58% | **∞** | 13.45% | 1 048 (32.9×) |
-| 16 384 | 10.78% | −18.47% | **∞** | 7.52% | 233.6 (7.33×) |
-| 32 768 | 21.57% | −16.24% | **∞** | 2.82% | 69.2 (2.17×) |
+| T | read frac | Δactive (reads) | strict PPL | targets unreachable | uniform tail fallback | HellaSwag | MMLU |
+|---|---|---|---|---|---|---|---|
+| *dense* | *100%* | — | *31.863* | — | — | ***47.29*** | ***47.18*** |
+| 4 096 | **2.70%** | −20.14% | **∞** | **20.09%** | 5 543 (174×) | **25.48** / 29.02 ᶠ | 47.18 / 47.18 ᶠ |
+| 8 192 | 5.39% | −19.58% | **∞** | 13.45% | 1 048 (32.9×) | — | — |
+| 16 384 | 10.78% | −18.47% | **∞** | 7.52% | 233.6 (7.33×) | — | — |
+| 32 768 | 21.57% | −16.24% | **∞** | 2.82% | 69.2 (2.17×) | — | — |
+
+ᶠ second figure is the uniform-fallback variant. Note it barely helps HellaSwag
+(25.48 → 29.02, against a 47.29 dense) — a shared tail logit lets a candidate be *scored*
+but not scored *correctly*.
 
 **Qwen3-30B-A3B**, T=4096, 2.70% of reads, −9.03% active: strict PPL **∞** (16.79% of dense
-mass outside the tier), fallback **126 362** (4984×), HellaSwag **25.67** — chance.
+mass outside the tier) against dense 25.349, fallback **126 362** (4984×), HellaSwag
+**25.67** against dense **78.57** — chance.
 
 Restricted to tokens it *can* emit, T=4096 scores PPL 16.7 on the 0.6B — **better than
 dense** — which is pure selection bias, since only easy frequent tokens get scored. Any
@@ -237,12 +248,14 @@ is in-tier, and that probability decays like coverage^L. HellaSwag endings avera
 tokens, so 82.96% per-token coverage at T=4096 becomes **9.35%** per-ending
 (`scripts/lm_head_task_coverage.py`):
 
-| T | target tokens in tier | **endings *fully* in tier** | measured HellaSwag (0.6B) |
-|---|---|---|---|
-| 4 096 | 82.96% | **9.35%** | **25.48** (chance) |
-| 8 192 | 89.74% | 25.20% | — |
-| 16 384 | 95.29% | 53.73% | — |
-| 32 768 | 98.85% | 85.95% | **40.61** |
+| T | target tokens in tier | **endings *fully* in tier** | measured HellaSwag (0.6B) | MMLU |
+|---|---|---|---|---|
+| *dense (no tier)* | *100%* | *100%* | ***47.29*** | ***47.18*** |
+| 4 096 | 82.96% | **9.35%** | **25.48** (chance) | 47.18 |
+| 8 192 | 89.74% | 25.20% | — | — |
+| 16 384 | 95.29% | 53.73% | — | — |
+| 32 768 | 98.85% | 85.95% | **40.61** | 47.18 |
+| *MMLU targets, any T* | *100%* | *100%* | — | *unchanged* |
 
 At T=32768, 85.95% coverage predicts 0.86·47.29 + 0.14·25 ≈ 44.2 against **40.61**
 measured — right size, right direction. This is the same arithmetic that makes perplexity
@@ -294,16 +307,16 @@ lm-eval `word_perplexity` on C4 (500 docs) and full HellaSwag 0-shot. Dense rows
 HellaSwag **78.57** and MMLU **80.94** against the plan's references of 78.56 and 80.91 — the
 harness and protocol are the ones the pre-registered bars were set in.
 
-| run | bits/param | bytes vs BF16 | Δactive (bytes) | top-1 agr | **C4 wppl** | rel | **HellaSwag** | Δ |
-|---|---|---|---|---|---|---|---|---|
-| dense BF16 | 16.00 | 100.00% | — | — | 25.349 | 1.000 | 78.57 | — |
-| **B2 ARCHead** | **4.31** | 26.92% | **−6.78%** | 93.31% | **25.676** | **1.013** | **78.48** | **−0.09** |
-| **B1-s** T=4096, tail 4b | 4.44 | 27.78% | −6.70% | **96.00%** | **25.827** | **1.019** | **78.34** | **−0.23** |
-| B2 ARCHead, *no* activation metric | 4.31 | 26.92% | −6.78% | 85.69% | 27.151 | 1.071 | — | — |
-| F3 RTN 4-bit g128 *(naive floor)* | 4.13 | 25.78% | −6.89% | 83.54% | 27.820 | 1.098 | 77.66 | −0.91 |
-| B1-s T=4096, tail 2b | 2.50 | 15.62% | −7.83% | 71.73% | 113.728 | 4.487 | — | — |
-| B3 RVQ 1.58 b | 1.58 | 9.88% | −8.36% | 45.26% | 103.394 | 4.079 | — | — |
-| B3 VQ-Logits K=1024 | 0.11 | 0.70% | −9.21% | 0.24% | 114 522 | 4517 | — | — |
+| run | bits/param | bytes vs BF16 | Δactive (bytes) | top-1 agr | **C4 wppl** | rel | **HellaSwag** | Δ | **MMLU** | Δ |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **dense BF16** | 16.00 | 100.00% | — | — | **25.349** | 1.000 | **78.57** | — | **80.94** | — |
+| **B2 ARCHead** | **4.31** | 26.92% | **−6.78%** | 93.31% | **25.676** | **1.013** | **78.48** | **−0.09** | *(running)* | — |
+| **B1-s** T=4096, tail 4b | 4.44 | 27.78% | −6.70% | **96.00%** | **25.827** | **1.019** | **78.34** | **−0.23** | *(running)* | — |
+| B2 ARCHead, *no* activation metric | 4.31 | 26.92% | −6.78% | 85.69% | 27.151 | 1.071 | — | — | — | — |
+| F3 RTN 4-bit g128 *(naive floor)* | 4.13 | 25.78% | −6.89% | 83.54% | 27.820 | 1.098 | 77.66 | −0.91 | *(running)* | — |
+| B1-s T=4096, tail 2b | 2.50 | 15.62% | −7.83% | 71.73% | 113.728 | 4.487 | — | — | — | — |
+| B3 RVQ 1.58 b | 1.58 | 9.88% | −8.36% | 45.26% | 103.394 | 4.079 | — | — | — | — |
+| B3 VQ-Logits K=1024 | 0.11 | 0.70% | −9.21% | 0.24% | 114 522 | 4517 | — | — | — | — |
 
 **What the 30B shows:**
 
@@ -338,24 +351,24 @@ on A100-Sagemaker, read with `scripts/show_sweep.py`.
 Held-out C4, 262 144 tokens, dense PPL **31.863**, untied. The head is 20.70% of this model
 against 9.28% of the 30B's active budget, so the same byte saving is worth **2.23×** more.
 
-| run | bits/param | bytes vs BF16 | Δactive (bytes) | **PPL** | rel |
-|---|---|---|---|---|---|
-| dense BF16 | 16.00 | 100.00% | — | 31.863 | 1.000 |
-| F3 RTN 8-bit g128 | 8.13 | 50.78% | −10.19% | 31.870 | 1.000 |
-| **B1-s** T=16384, tail 4b | 5.41 | 33.78% | −13.71% | **31.988** | **1.004** |
-| **B1-s** T=4096, tail 4b | 4.44 | 27.78% | −14.95% | **32.199** | **1.011** |
-| **B2 ARCHead** | 4.37 | 27.28% | −15.05% | **32.284** | **1.013** |
-| B2 ARCHead, *no* metric | 4.37 | 27.28% | −15.05% | 33.011 | 1.036 |
-| F3 RTN 4-bit g128 | 4.13 | 25.78% | −15.36% | 33.188 | 1.042 |
-| B1-s T=16384, tail 2b | 3.62 | 22.63% | −16.01% | 61.071 | 1.917 |
-| F3 RTN 3-bit g128 | 3.13 | 19.53% | −16.66% | 39.702 | 1.246 |
-| B1-s T=4096, tail 2b | 2.50 | 15.62% | −17.47% | 78.377 | 2.460 |
-| **B2 ARCHead, 2-bit residual** | 2.37 | 14.78% | −17.64% | **60.891** | **1.911** |
-| B2 ARCHead 2-bit, *no* metric | 2.37 | 14.78% | −17.64% | 211.109 | 6.626 |
-| F3 RTN 2-bit g128 | 2.13 | 13.28% | −17.95% | 339.261 | 10.65 |
-| B3 RVQ 1.58 b (d16, K256, 3 st) | 1.58 | 9.88% | −18.65% | 55.906 | 1.755 |
-| B3 RVQ 1.03 b (d8, K256, 1 st) | 1.03 | 6.42% | −19.37% | 79.861 | 2.507 |
-| B3 VQ-Logits K=1024 | 0.12 | 0.74% | −20.55% | 33 542 | 1053 |
+| run | bits/param | bytes vs BF16 | Δactive (bytes) | **PPL** | rel | HellaSwag | MMLU |
+|---|---|---|---|---|---|---|---|
+| **dense BF16** | 16.00 | 100.00% | — | **31.863** | 1.000 | **47.29** | **47.18** |
+| F3 RTN 8-bit g128 | 8.13 | 50.78% | −10.19% | 31.870 | 1.000 | — | — |
+| **B1-s** T=16384, tail 4b | 5.41 | 33.78% | −13.71% | **31.988** | **1.004** | — | — |
+| **B1-s** T=4096, tail 4b | 4.44 | 27.78% | −14.95% | **32.199** | **1.011** | 47.02 | **47.18** |
+| **B2 ARCHead** | 4.37 | 27.28% | −15.05% | **32.284** | **1.013** | **47.33** | **47.25** |
+| B2 ARCHead, *no* metric | 4.37 | 27.28% | −15.05% | 33.011 | 1.036 | — | — |
+| F3 RTN 4-bit g128 | 4.13 | 25.78% | −15.36% | 33.188 | 1.042 | 46.96 | 46.82 |
+| B1-s T=16384, tail 2b | 3.62 | 22.63% | −16.01% | 61.071 | 1.917 | **47.36** | **47.18** |
+| F3 RTN 3-bit g128 | 3.13 | 19.53% | −16.66% | 39.702 | 1.246 | — | — |
+| B1-s T=4096, tail 2b | 2.50 | 15.62% | −17.47% | 78.377 | 2.460 | — | — |
+| **B2 ARCHead, 2-bit residual** | 2.37 | 14.78% | −17.64% | **60.891** | **1.911** | 44.63 | 46.79 |
+| B2 ARCHead 2-bit, *no* metric | 2.37 | 14.78% | −17.64% | 211.109 | 6.626 | — | — |
+| F3 RTN 2-bit g128 | 2.13 | 13.28% | −17.95% | 339.261 | 10.65 | — | — |
+| B3 RVQ 1.58 b (d16, K256, 3 st) | 1.58 | 9.88% | −18.65% | 55.906 | 1.755 | 45.69 | 45.10 |
+| B3 RVQ 1.03 b (d8, K256, 1 st) | 1.03 | 6.42% | −19.37% | 79.861 | 2.507 | — | — |
+| B3 VQ-Logits K=1024 | 0.12 | 0.74% | −20.55% | 33 542 | 1053 | 28.45 | **22.95** |
 
 **Reading the ladder:**
 
@@ -396,6 +409,7 @@ throughput claims do not.
 
 | variant | bytes | top-1 agreement | KL vs dense |
 |---|---|---|---|
+| *dense BF16* | *100%* | *100.00%* | *0.0000* |
 | B1-s T=4096 tail 4b | 27.78% | **96.73%** | **0.0119** |
 | B2 ARCHead | 27.28% | 92.04% | 0.0125 |
 | B2 ARCHead, no metric | 27.28% | 86.57% | 0.0349 |
