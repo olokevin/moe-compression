@@ -35,10 +35,12 @@ counting tokens.
 | **Sparse activation** (B1-a) | **Dead, and worse than the plan expected.** Perplexity is literally infinite (20.1% of targets unreachable at 2.7% of rows), *and* HellaSwag collapses to chance — **78.57 → 25.67** on the 30B. |
 
 ⚠️ **One plan assumption did not survive contact.** Plan §3 predicted that HellaSwag and
-MMLU would both be blind to a sparse head. **MMLU is** (bit-identical, 47.18 → 47.18).
-**HellaSwag is not** — its endings average 13.7 tokens, so only 9.35% of them are fully
-inside a top-4096 tier, and the other 91% score −inf. It is a *valid* detector of
-sparse-head damage. Details in [§ Sparse activation](#sparse-activation-b1-a--why-it-fails).
+MMLU would both be blind to a sparse head. **MMLU is** (bit-identical, 47.18 → 47.18, since
+its " A".." D" targets survive any tier). **HellaSwag is not** — its endings average 13.7
+tokens, so only 9.35% are fully inside a top-4096 tier and the other 91% score −inf. It is
+a *valid* detector of sparse-head damage. The single clearest case: `B1-p T=32768` costs
+HellaSwag **−6.68 pt** and MMLU **exactly 0.00**.
+Details in [§ Sparse activation](#sparse-activation-b1-a--why-it-fails).
 
 **Where sophistication clearly pays:** below ~4 bits. At 15% storage ARCHead's
 activation-metric correction is worth **3.5× lower perplexity** than fitting the same
@@ -158,14 +160,17 @@ so these are savings against the *untied* model, not against the shipped checkpo
 3. **Codebooks reach storage scalars can't.** RVQ at 1.58 b/w (9.88%) gives 1.755 —
    better than 2-bit RTN (10.65) at *lower* storage. But nothing at ≤10% storage is
    within a stderr of dense.
-4. **VQ-Logits fails completely** post-training (1053× PPL). The paper reports +4% —
-   it presumably fine-tunes; a drop-in codebook substitution does not survive.
+4. **VQ-Logits fails completely** post-training: 1053× PPL, 0.3% top-1 agreement, and it is
+   the one method that drags MMLU *below chance* (22.95 vs 25.0). The paper reports +4% PPL
+   — it presumably fine-tunes; a drop-in codebook substitution does not survive.
 
 ---
 
 ### Downstream tasks
 
 Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B.
+
+Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B. Complete.
 
 | run | store% / read% | Δactive | C4 rel | HellaSwag acc_norm | Δ | MMLU acc | Δ |
 |---|---|---|---|---|---|---|---|
@@ -174,23 +179,36 @@ Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B.
 | B1-s T=4096, tail 4b | 27.78 | −14.95% | 1.011 | 47.02 | −0.27 | **47.18** | **0.00** |
 | F3 RTN 4-bit g128 | 25.78 | −15.36% | 1.042 | 46.96 | −0.33 | 46.82 | −0.36 |
 | **B1-s T=16384, tail 2b** | 22.63 | −16.01% | **1.917** | **47.36** | **+0.07** | **47.18** | **0.00** |
+| B2 ARCHead, 2-bit residual | 14.78 | −17.64% | 1.911 | 44.63 | −2.66 | 46.79 | −0.39 |
 | B3 RVQ 1.58 b/w | 9.88 | −18.65% | 1.755 | 45.69 | −1.60 | 45.10 | −2.08 |
-| B1-p T=32768 *(tail pruned)* | 21.57 | −16.24% | — | **40.61** | **−6.68** | — | — |
+| **B1-p T=32768** *(tail pruned)* | 21.57 | −16.24% | — | **40.61** | **−6.68** | **47.18** | **0.00** |
+| **F2 low-rank r=256** | 25.17 | −15.49% | 2.568 | **37.80** | **−9.49** | 44.62 | −2.56 |
 | B1-a T=4096 strict | 100 / 2.70 | −20.14% | ∞ | **25.48** | **−21.81** | 47.18 | 0.00 |
 | B1-a T=4096, uniform fallback | 100 / 2.70 | −20.14% | 174× | **29.02** | **−18.27** | 47.18 | 0.00 |
+| B3 VQ-Logits K=1024 | 0.74 | −20.55% | 1053× | 28.45 | −18.84 | **22.95** | **−24.23** |
 
-Two things to read off this table.
+Three things to read off this table.
 
-**These tasks cannot rank head methods.** Look at `B1-s T=16384/tail-2b`: C4 perplexity
-**nearly doubles** (1.917×) and yet HellaSwag moves **+0.07** and MMLU **0.00**. A method
-selected on task accuracy alone would call that head free. At ~27% storage all three real
-methods sit inside ±0.36 pt on both tasks while C4 separates them 1.1 / 1.3 / 4.2%. C4
-perplexity is the discriminator; the tasks only certify "not catastrophic".
+**1. At sane operating points the tasks cannot rank methods.** Look at
+`B1-s T=16384/tail-2b`: C4 perplexity **nearly doubles** (1.917×) and yet HellaSwag moves
+**+0.07** and MMLU **0.00**. A method chosen on task accuracy would call that head free. At
+~27% storage all three real methods sit inside ±0.36 pt on both tasks while C4 separates
+them 1.1 / 1.3 / 4.2%. Select on perplexity; the tasks only certify "not catastrophic".
 
-**Except when rows go missing, and then HellaSwag is brutal.** The bottom three rows all
-drop or unread rows, and HellaSwag tracks the damage the coverage table predicts:
-T=32768 keeps 85.95% of endings fully in-tier → **−6.68 pt**; T=4096 keeps 9.35% →
-**−21.81 pt**, i.e. chance. MMLU stays bit-identical throughout. The mechanism is next.
+**2. `B1-p T=32768` is the cleanest demonstration of the asymmetry** — one head, HellaSwag
+**−6.68 pt**, MMLU **exactly 0.00**. Whatever else is true, these two benchmarks are not
+measuring the same thing about an output head.
+
+**3. Low-rank is detectable on tasks too, unlike quantization.** At matched ~25% storage,
+low-rank costs **−9.49 pt** HellaSwag where INT4 costs −0.33. That is a 9-point task gap at
+the same storage, and an independent confirmation of the F2 exclusion that does not route
+through perplexity at all.
+
+**A caveat on MMLU's blindness.** It is blind to *tier masking* — where the " A".." D" rows
+survive bit-exact — not to head damage in general. VQ-Logits drops MMLU to **22.95**, which
+is *below* the 25% chance floor, and low-rank costs it 2.56 pt. So MMLU's insensitivity is
+a property of methods that leave its four answer rows intact, not a blanket property of the
+benchmark.
 
 ---
 
@@ -225,14 +243,21 @@ Full ladder on Qwen3-30B-A3B (whitened, `p=1/2`):
 | **F2 low-rank r=512** | 25.34% | **88.844** | **3.505** | 55.6% |
 | F2 low-rank r=1024 | 50.67% | 38.207 | 1.508 | 74.3% |
 | F2 low-rank r=1536 | 76.01% | 28.277 | **1.116** | 85.3% |
-| F2 r=512, *unwhitened* | 25.34% | *(running)* | — | **9.2%** |
+| F2 r=512, *unwhitened* | 25.34% | **1.6 × 10⁸** | **6.3 M×** | **9.2%** |
 | F3 INT4 *(storage-matched to r=512)* | 25.78% | 27.820 | 1.098 | 83.5% |
 | B1-s T=4096 tail-4b | 27.78% | 25.827 | 1.019 | 96.0% |
 
 **+250% PPL at 25% storage against the kill criterion's +5%** — missed by 50×, and a 25×
-larger excess than storage-matched INT4. Two further nails: low-rank still costs **+11.6%
-at 76% storage** (a 4-bit head costs +9.8% at a *third* of that), and the unwhitened
-control retains **9.2%** of dense argmaxes, confirming the whitening result transfers.
+larger excess than storage-matched INT4. Three further nails:
+
+- Low-rank still costs **+11.6% at 76% storage**, where a 4-bit head costs +9.8% at a
+  *third* of the storage.
+- The unwhitened control is **destroyed** — perplexity 1.6×10⁸ and 9.2% of dense argmaxes.
+  Whitening is load-bearing at `d=2048` exactly as at `d=1024`, and a naive SVD of an
+  lm_head is not a weak baseline, it is a broken one.
+- It fails on **downstream tasks** too, which quantization at the same storage does not:
+  HellaSwag −9.49 pt vs INT4's −0.33 (see the task table above).
+
 **Plan §2's exclusion is confirmed at both `d=1024` and `d=2048`; risk 3 is discharged.**
 
 Runnable through the standard path now: `method: lowrank` with `rank_frac` (a fraction of
@@ -377,8 +402,9 @@ lm-eval `word_perplexity` on C4 (500 docs) and full HellaSwag 0-shot. `Δactive`
 against 3.353 B; the parenthesised figure is against the post-−73%-expert-pruning active
 budget, where the head's share rises to 15.41%.
 
-Our dense HellaSwag comes out at **78.57**, matching the repo's standing 78.56 reference —
-a useful check that the harness and protocol are the same ones the plan's bar was set in.
+Our dense rows come out at **HellaSwag 78.57** and **MMLU 80.94**, against the plan's
+standing references of 78.56 and 80.91 — a useful check that the harness and protocol are
+the same ones the pre-registered bars were set in.
 
 | run | store% | Δactive | top-1 agr | **C4 wppl** | rel | **HellaSwag** | Δ |
 |---|---|---|---|---|---|---|---|
@@ -433,8 +459,8 @@ Clause-by-clause on the 30B:
 | clause | bar | ARCHead @26.9% | B1-s @27.8% |
 |---|---|---|---|
 | active-param reduction | ≥6.9% | −6.78% ≈ *at bar* | −6.70% ≈ *at bar* |
-| **HellaSwag** | ≥78.1 | **78.48 ✅** | **78.34 ✅** |
-| MMLU | ≥80.5 | *(running)* | *(running)* |
+| **HellaSwag** | ≥78.1 (dense 78.57) | **78.48 ✅** | **78.34 ✅** |
+| MMLU | ≥80.5 (dense **80.94**) | *(running)* | *(running)* |
 | **C4 PPL** | ≤+1% | **+1.29% ✗** | +1.89% ✗ |
 
 So **HellaSwag passes outright** and the **C4 clause is the binding failure** — narrowly
@@ -491,9 +517,9 @@ LoRA-recovery arm, not fewer bits.
 
 | # | item | status |
 |---|---|---|
-| 1 | 30B **MMLU** column (dense, B1-s, B2, INT4, B1-a) | **running** — the pre-registered clause. Expected to pass trivially: MMLU is provably blind (0.6B moved 0.00 pt), so this closes a formality, not a question. |
-| 2 | F2 ladder at `d=2048` | **done** except the unwhitened control's perplexity (its 9.2% agreement already settles it). |
-| 3 | Remaining 0.6B task rows (`b2_15`, `b3_vql`, `f2_lr25`) | **running** locally. |
+| 1 | 30B **MMLU** column | **running** — dense done (**80.94**, matching the 80.91 reference); 4 compressed variants to go, ~3 h each. On the 0.6B the same variants moved MMLU by 0.00 / +0.07 / −0.36 pt, so this closes a formality rather than a question. |
+| 2 | F2 ladder at `d=2048` | **done** (all 4 rows). |
+| 3 | 0.6B task sweep | **done** (all 12 rows across both passes). |
 | 4 | **Phase 5** — head ⊕ the repo's −73% expert config | **not run.** Configs exist (`*_lmhead_*_composed_*.yaml`). Its stated purpose was to test the ~15.4% denominator, which is arithmetic already reported in every accounting line; the open empirical question is only whether the two compressions *interact*, which is worth one run. |
 | 5 | **F1** — reproduce/refute CSV-Decode's 18.4% \|S\|/V | **not run.** Needs cloning an external repo. The plan says not to publish the criticism without it, so the certificate branch stays formally open — though B1-a's collapse independently shows that any read-set of a few % of V is unusable, however it is chosen. |
 | 6 | LoRA-recovery arm | **not run**, and per plan §7's fail clause this is the right next step rather than pushing bits lower. |
