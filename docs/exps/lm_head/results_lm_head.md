@@ -198,7 +198,7 @@ buys it for free.
 |---|---|---|---|---|
 | 256 (25% of d) | 25.17% | **81.823** (2.57×) | 7 827 (246×) | **3.505×** |
 | 512 (50%) | 50.34% | 44.700 (1.40×) | 3 593 (113×) | **1.508×** |
-| 768 (75%) | 75.51% | 35.096 (1.10×) | 1 676 (53×) | *(running)* |
+| 768 (75%) | 75.51% | 35.096 (1.10×) | 1 676 (53×) | **1.116×** |
 
 **Kill criterion: "if low-rank at 25% storage lands within +5% PPL, low-rank returns to
 the shortlist."** It lands at **+157%**, against +4.2% for storage-matched INT4 — a
@@ -208,23 +208,26 @@ Two secondary facts: **whitening is mandatory** (96× better at r=256 — plain 
 lm_head is catastrophic), and even at 75% storage low-rank still costs +10%.
 
 **At `d=2048` — the replication plan risk 3 asked for — the verdict is the same, harder.**
-Rank-512 (25.34% storage, whitened) on Qwen3-30B-A3B:
+Full ladder on Qwen3-30B-A3B (whitened, `p=1/2`):
 
-| | C4 wppl | rel | top-1 agr |
-|---|---|---|---|
-| dense | 25.349 | 1.000 | — |
-| **F2 low-rank r=512 @ 25.34%** | **88.844** | **3.505** | **55.6%** |
-| F3 INT4 @ 25.78% *(storage-matched)* | 27.820 | 1.098 | 83.5% |
-| B1-s @ 27.78% | 25.827 | 1.019 | 96.0% |
+| | storage | C4 wppl | rel | top-1 agr |
+|---|---|---|---|---|
+| dense | 100% | 25.349 | 1.000 | — |
+| **F2 low-rank r=512** | 25.34% | **88.844** | **3.505** | 55.6% |
+| F2 low-rank r=1024 | 50.67% | 38.207 | 1.508 | 74.3% |
+| F2 low-rank r=1536 | 76.01% | 28.277 | **1.116** | 85.3% |
+| F2 r=512, *unwhitened* | 25.34% | *(running)* | — | **9.2%** |
+| F3 INT4 *(storage-matched to r=512)* | 25.78% | 27.820 | 1.098 | 83.5% |
+| B1-s T=4096 tail-4b | 27.78% | 25.827 | 1.019 | 96.0% |
 
-**+250% PPL against the kill criterion's +5%** — missed by 50×, and a 25× larger excess
-than storage-matched INT4. Low-rank retains barely half the dense argmaxes at a storage
-point where frequency tiering retains 96%. **The exclusion in plan §2 is confirmed at both
-`d=1024` and `d=2048`; risk 3 is discharged.**
+**+250% PPL at 25% storage against the kill criterion's +5%** — missed by 50×, and a 25×
+larger excess than storage-matched INT4. Two further nails: low-rank still costs **+11.6%
+at 76% storage** (a 4-bit head costs +9.8% at a *third* of that), and the unwhitened
+control retains **9.2%** of dense argmaxes, confirming the whitening result transfers.
+**Plan §2's exclusion is confirmed at both `d=1024` and `d=2048`; risk 3 is discharged.**
 
 Runnable through the standard path now: `method: lowrank` with `rank_frac` (a fraction of
-`d`, so one variant name means the same storage point on any model). Higher ranks and the
-unwhitened control are still filling in at `lm_head_sweep_30b_f2.json`.
+`d`, so one variant name means the same storage point on any model).
 
 ---
 
@@ -472,8 +475,8 @@ LoRA-recovery arm, not fewer bits.
 | # | item | status |
 |---|---|---|
 | 1 | 30B **MMLU** column (dense, B1-s, B2, INT4, B1-a) | **running** — the pre-registered clause. Expected to pass trivially: MMLU is provably blind (0.6B moved 0.00 pt), so this closes a formality, not a question. |
-| 2 | F2 ladder rows `lr50` / `lr75` / `lr25_plain` at `d=2048` | **running** — the verdict is already settled by `lr25` (+250%); these fill in the curve. |
-| 3 | Remaining 0.6B task rows (`b1p_t32k`, `b2_15`, `b3_vql`, `f2_lr25`) | **running** locally. |
+| 2 | F2 ladder at `d=2048` | **done** except the unwhitened control's perplexity (its 9.2% agreement already settles it). |
+| 3 | Remaining 0.6B task rows (`b2_15`, `b3_vql`, `f2_lr25`) | **running** locally. |
 | 4 | **Phase 5** — head ⊕ the repo's −73% expert config | **not run.** Configs exist (`*_lmhead_*_composed_*.yaml`). Its stated purpose was to test the ~15.4% denominator, which is arithmetic already reported in every accounting line; the open empirical question is only whether the two compressions *interact*, which is worth one run. |
 | 5 | **F1** — reproduce/refute CSV-Decode's 18.4% \|S\|/V | **not run.** Needs cloning an external repo. The plan says not to publish the criticism without it, so the certificate branch stays formally open — though B1-a's collapse independently shows that any read-set of a few % of V is unusable, however it is chosen. |
 | 6 | LoRA-recovery arm | **not run**, and per plan §7's fail clause this is the right next step rather than pushing bits lower. |
