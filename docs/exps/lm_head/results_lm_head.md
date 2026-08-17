@@ -44,10 +44,18 @@ activation-metric correction is worth **3.5× lower perplexity** than fitting th
 correction in plain Frobenius error (60.9 vs 211.1). The paper's central claim
 reproduces.
 
+**On downstream tasks both winners are free.** 30B HellaSwag: dense **78.57** → ARCHead
+**78.48**, B1-s **78.34** — both clear the pre-registered ≥78.1 bar. But the tasks cannot
+*rank* methods: a head that nearly doubles C4 perplexity still scores +0.07 on HellaSwag
+and 0.00 on MMLU (see below). Select on perplexity; confirm on tasks.
+
 **But the ceiling is small.** The head is 1.02% of Qwen3-30B-A3B's total and **9.28% of
 its active** parameters (measured; matches the plan exactly). The whole design space is
 0 → 9.28% of active params, INT4-equivalent storage already banks **−6.8 pp** of it, and
 the remaining 2.4 pp costs real accuracy. This is a cheap, safe win, not a large one.
+
+**Verdict:** "acceptable, not headline success" — plan §7's second tier. Storage and
+HellaSwag clauses pass; C4 misses +1% by 0.29 pp for ARCHead.
 
 ---
 
