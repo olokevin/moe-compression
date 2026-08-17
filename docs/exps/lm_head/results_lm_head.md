@@ -407,9 +407,9 @@ Batch sizes were reduced (c4=2, hellaswag=8) so 61 GB of weights plus the
 `[bs, 2048, 151936]` logits tensor fit the free GPUs. Both metrics are computed per
 request, so this changes speed only, not the numbers.
 
-**Still running:** F2's low-rank ladder at `d=2048` (the plan's risk-3 guard) and the MMLU
-column, both on A100-Sagemaker with 4 GPUs —
-`results_eval/lm_head_sweep_30b_{f2,mmlu}.json`, read with `scripts/show_sweep.py`.
+**Still running:** the MMLU column, on A100-Sagemaker —
+`results_eval/lm_head_sweep_30b_mmlu.json`, read with `scripts/show_sweep.py`. (F2's
+`d=2048` ladder is done; see [§ F2](#f2--f3--the-falsification-runs).)
 
 ---
 
@@ -418,23 +418,30 @@ column, both on A100-Sagemaker with 4 GPUs —
 Plan §7: **≥6.9% active-param reduction with HellaSwag ≥78.1, MMLU ≥80.5, C4 PPL within
 +1%.**
 
-On the 30B the storage clause is met — ARCHead and B1-s both sit at −6.7 to −6.8% of
-active params — and **the C4 +1% clause is the binding one, narrowly missed**:
+Clause-by-clause on the 30B:
 
-- ARCHead at 26.9% storage: **+1.29%** PPL, −6.78% active.
-- B1-s T=4096/tail-4b at 27.8%: **+1.89%** PPL, −6.70% active.
-- (0.6B, for reference: B1-s T=16384/tail-4b **passes** at +0.4%, but at 33.8% storage.)
+| clause | bar | ARCHead @26.9% | B1-s @27.8% |
+|---|---|---|---|
+| active-param reduction | ≥6.9% | −6.78% ≈ *at bar* | −6.70% ≈ *at bar* |
+| **HellaSwag** | ≥78.1 | **78.48 ✅** | **78.34 ✅** |
+| MMLU | ≥80.5 | *(running)* | *(running)* |
+| **C4 PPL** | ≤+1% | **+1.29% ✗** | +1.89% ✗ |
 
-So the honest reading is **"acceptable, not headline success"** — the plan's own second
-tier. A head at ~27% of BF16 costs ~1.3% perplexity on the primary target, which is a
-real and very cheap win, but it is bounded by §1's arithmetic: INT4-equivalent storage
-already banks −6.8 of the available −9.28 pp, and the last 2.4 pp costs accuracy fast.
-The HellaSwag/MMLU clauses remain unevaluated on the 30B (in flight) — though per §3
-they are the *insensitive* metrics and are expected to pass trivially.
+So **HellaSwag passes outright** and the **C4 clause is the binding failure** — narrowly
+for ARCHead. The storage clause lands a whisker under 6.9% because "INT4-equivalent" in
+practice carries group scales (4.125 bits, not 4.0); at 25.78% storage plain INT4 does hit
+−6.89%, but at +9.8% perplexity.
+
+The honest reading is therefore **"acceptable, not headline success"** — the plan's own
+second tier (within 2 stderr on the tasks, which both methods clear comfortably). A head at
+~27% of BF16 costs ~1.3% perplexity and ~0.1 pt of HellaSwag on the primary target: a real
+and very cheap win, bounded by §1's arithmetic. INT4-equivalent storage already banks −6.8
+of the available −9.28 pp, and the last 2.4 pp costs accuracy fast.
 
 Plan §7 also pre-registered: *"if B1-a shows dense-level MMLU/HellaSwag **and**
-dense-level C4 PPL at 2.7% of head reads, verify the install is taking effect."* It does
-not — C4 PPL is infinite on both models. Gates 0a/0c confirm the install is real.
+dense-level C4 PPL at 2.7% of head reads, verify the install is taking effect."* It shows
+dense-level MMLU but **not** dense-level HellaSwag (78.57 → 25.67) and not dense-level C4
+(∞), so no verification was needed — but gates 0a/0c confirm the install is real anyway.
 
 **Recommendation.** Take B1-s if you want zero calibration machinery (a token histogram
 and a row-wise quantizer), ARCHead if 0.6 pp of perplexity on the 30B is worth an
