@@ -30,7 +30,7 @@ calibration cost beyond counting tokens.
 
 | | verdict |
 |---|---|
-| **Low-rank heads** (F2) | **Dead, confirmed.** +157% PPL at 25% storage, vs +4.2% for INT4. The plan's kill criterion was "within +5%". |
+| **Low-rank heads** (F2) | **Dead, confirmed at both `d=1024` and `d=2048`.** At 25% storage: **+250% PPL on the 30B** (+157% on the 0.6B) against a **+5%** kill criterion, while storage-matched INT4 costs +9.8%. |
 | **Sparse activation** (B1-a) | **Dead, and worse than the plan expected.** Perplexity is literally infinite (20.1% of targets unreachable at 2.7% of rows), *and* HellaSwag collapses to chance — **78.57 → 25.67** on the 30B. |
 
 ⚠️ **One plan assumption did not survive contact.** Plan §3 predicted that HellaSwag and
@@ -201,13 +201,24 @@ the shortlist."** It lands at **+157%**, against +4.2% for storage-matched INT4 
 Two secondary facts: **whitening is mandatory** (96× better at r=256 — plain SVD of an
 lm_head is catastrophic), and even at 75% storage low-rank still costs +10%.
 
-**At `d=2048` (the 30B, the replication the plan asked for)** the first data point is
-already damning: rank-512 at **25.34% storage gives 55.3% top-1 agreement**, against
-**96.0%** for B1-s and **83.5%** for plain INT4 at the same storage. Perplexities are
-still running (`lm_head_sweep_30b_f2.json`), but no method with barely half the dense
-argmaxes recovers a +5% perplexity bound. Runnable through the standard path now:
-`method: lowrank` with `rank_frac` (a fraction of `d`, so one variant means the same
-storage point on any model).
+**At `d=2048` — the replication plan risk 3 asked for — the verdict is the same, harder.**
+Rank-512 (25.34% storage, whitened) on Qwen3-30B-A3B:
+
+| | C4 wppl | rel | top-1 agr |
+|---|---|---|---|
+| dense | 25.349 | 1.000 | — |
+| **F2 low-rank r=512 @ 25.34%** | **88.844** | **3.505** | **55.6%** |
+| F3 INT4 @ 25.78% *(storage-matched)* | 27.820 | 1.098 | 83.5% |
+| B1-s @ 27.78% | 25.827 | 1.019 | 96.0% |
+
+**+250% PPL against the kill criterion's +5%** — missed by 50×, and a 25× larger excess
+than storage-matched INT4. Low-rank retains barely half the dense argmaxes at a storage
+point where frequency tiering retains 96%. **The exclusion in plan §2 is confirmed at both
+`d=1024` and `d=2048`; risk 3 is discharged.**
+
+Runnable through the standard path now: `method: lowrank` with `rank_frac` (a fraction of
+`d`, so one variant name means the same storage point on any model). Higher ranks and the
+unwhitened control are still filling in at `lm_head_sweep_30b_f2.json`.
 
 ---
 
@@ -420,10 +431,10 @@ LoRA-recovery arm, not fewer bits.
 
 ## Caveats
 
-1. **The full sweep is on Qwen3-0.6B** (`d=1024`, untied); the 30B arm has its four
-   headline C4 rows and the rest in flight. F2's `d=2048` replication is specifically
-   **not** done — low-rank is excluded on 0.6B evidence plus the 30B's harder-to-quantize
-   behaviour, which argues the same way but is not the requested experiment.
+1. **Bit-width sweeps are on Qwen3-0.6B** (`d=1024`, untied); the 30B has all 11 C4
+   variants, HellaSwag for the headline five, and the F2 ladder. Where the two models
+   disagree (the B1-s/B2 ordering, and how fast sub-4-bit points degrade), trust the 30B —
+   and do **not** extrapolate the SLM's gentler low-bit behaviour to it.
 2. **ARCHead is a reimplementation.** Algorithm 1, the objective, and the published
    Qwen hyperparameters (`rc=10, rr=6, g=64, p=0.75, ridge=1e-3`) are the paper's; the
    packed kernel is not. Storage is an **analytic bit count**, not a measured
@@ -438,9 +449,25 @@ LoRA-recovery arm, not fewer bits.
    (`scripts/lm_head_gates.py:c4_ppl`), not lm-eval's `word_perplexity`. The 30B arm
    uses lm-eval, so the two PPL columns are not directly comparable across arms —
    compare within an arm, against that arm's dense row.
-6. **Phases not run:** F1 (CSV-Decode reproduction), Phase 5 (composition with −73%
-   expert pruning — configs generated, `*_composed_*.yaml`), and the MMLU column of
-   the 30B arm.
+6. **Randomized SVD is now seeded** (`quant.py:randomized_svd`). It was not for the first
+   F2 run, which is why an early note recorded 55.32% top-1 agreement where the seeded
+   re-run gives 55.57% for the same configuration.
+
+---
+
+## What remains
+
+| # | item | status |
+|---|---|---|
+| 1 | 30B **MMLU** column (dense, B1-s, B2, INT4, B1-a) | **running** — the pre-registered clause. Expected to pass trivially: MMLU is provably blind (0.6B moved 0.00 pt), so this closes a formality, not a question. |
+| 2 | F2 ladder rows `lr50` / `lr75` / `lr25_plain` at `d=2048` | **running** — the verdict is already settled by `lr25` (+250%); these fill in the curve. |
+| 3 | Remaining 0.6B task rows (`b1p_t32k`, `b2_15`, `b3_vql`, `f2_lr25`) | **running** locally. |
+| 4 | **Phase 5** — head ⊕ the repo's −73% expert config | **not run.** Configs exist (`*_lmhead_*_composed_*.yaml`). Its stated purpose was to test the ~15.4% denominator, which is arithmetic already reported in every accounting line; the open empirical question is only whether the two compressions *interact*, which is worth one run. |
+| 5 | **F1** — reproduce/refute CSV-Decode's 18.4% \|S\|/V | **not run.** Needs cloning an external repo. The plan says not to publish the criticism without it, so the certificate branch stays formally open — though B1-a's collapse independently shows that any read-set of a few % of V is unusable, however it is chosen. |
+| 6 | LoRA-recovery arm | **not run**, and per plan §7's fail clause this is the right next step rather than pushing bits lower. |
+
+Nothing outstanding changes a conclusion above. Items 1–3 are curve-filling; 4–6 are new
+scope.
 
 ---
 

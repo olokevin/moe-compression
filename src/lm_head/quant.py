@@ -134,15 +134,26 @@ def randomized_svd(
     rank: int,
     oversample: int = 10,
     n_iter: int = 4,
+    seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Randomized truncated SVD of a tall ``(V, D)`` matrix. Returns ``(U, S, Vh)``.
 
     ``torch.svd_lowrank`` with power iterations; at the ranks these baselines use
-    (6-10 for ARCHead, up to 1024 for the F2 low-rank ladder) this is both faster
+    (6-10 for ARCHead, up to 1536 for the F2 low-rank ladder) this is both faster
     and lower-memory than a full ``linalg.svd`` of a 152k x 2048 matrix.
+
+    ``seed`` pins the random projection. Without it two runs of the same
+    configuration disagree slightly (observed: 55.32% vs 55.57% top-1 agreement for
+    the same rank-512 head), which is not a difference anyone should have to explain
+    in a results table.
     """
     q = int(min(A.shape[0], A.shape[1], rank + oversample))
-    U, S, V = torch.svd_lowrank(A.float(), q=q, niter=int(n_iter))
+    gen_state = torch.random.get_rng_state()
+    try:
+        torch.manual_seed(int(seed))
+        U, S, V = torch.svd_lowrank(A.float(), q=q, niter=int(n_iter))
+    finally:
+        torch.random.set_rng_state(gen_state)
     r = int(min(rank, S.numel()))
     return U[:, :r], S[:r], V[:, :r].T
 
