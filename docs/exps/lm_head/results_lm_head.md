@@ -158,24 +158,30 @@ so these are savings against the *untied* model, not against the shipped checkpo
 
 Same model, lm-eval, full test sets. `Δactive` is against the untied 0.752 B.
 
-| run | store% / read% | Δactive | HellaSwag acc_norm | Δ | MMLU acc (5-shot) | Δ |
-|---|---|---|---|---|---|---|
-| dense BF16 | 100.00 | — | 47.29 | — | 47.18 | — |
-| B2 ARCHead | 27.28 | −15.05% | **47.33** | +0.04 | **47.25** | +0.07 |
-| B1-s T=4096, tail 4b | 27.78 | −14.95% | 47.02 | −0.27 | **47.18** | **0.00** |
-| F3 RTN 4-bit g128 | 25.78 | −15.36% | 46.96 | −0.33 | 46.82 | −0.36 |
-| B3 RVQ 1.58 b/w | 9.88 | −18.65% | 45.69 | −1.60 | 45.10 | −2.08 |
-| B1-a T=4096 strict | 100 / 2.70 | −20.14% | **25.48** | **−21.81** | 47.18 | 0.00 |
-| B1-a T=4096, uniform fallback | 100 / 2.70 | −20.14% | **29.02** | **−18.27** | 47.18 | 0.00 |
+| run | store% / read% | Δactive | C4 rel | HellaSwag acc_norm | Δ | MMLU acc | Δ |
+|---|---|---|---|---|---|---|---|
+| dense BF16 | 100.00 | — | 1.000 | 47.29 | — | 47.18 | — |
+| B2 ARCHead | 27.28 | −15.05% | 1.013 | **47.33** | +0.04 | **47.25** | +0.07 |
+| B1-s T=4096, tail 4b | 27.78 | −14.95% | 1.011 | 47.02 | −0.27 | **47.18** | **0.00** |
+| F3 RTN 4-bit g128 | 25.78 | −15.36% | 1.042 | 46.96 | −0.33 | 46.82 | −0.36 |
+| **B1-s T=16384, tail 2b** | 22.63 | −16.01% | **1.917** | **47.36** | **+0.07** | **47.18** | **0.00** |
+| B3 RVQ 1.58 b/w | 9.88 | −18.65% | 1.755 | 45.69 | −1.60 | 45.10 | −2.08 |
+| B1-p T=32768 *(tail pruned)* | 21.57 | −16.24% | — | **40.61** | **−6.68** | — | — |
+| B1-a T=4096 strict | 100 / 2.70 | −20.14% | ∞ | **25.48** | **−21.81** | 47.18 | 0.00 |
+| B1-a T=4096, uniform fallback | 100 / 2.70 | −20.14% | 174× | **29.02** | **−18.27** | 47.18 | 0.00 |
 
-At ~27% storage all three real methods are inside noise on both tasks (≤0.36 pt), so the
-tasks confirm the head treatment is harmless but cannot rank the methods — C4 perplexity,
-which separates these same heads by 1.1 / 1.3 / 4.2%, is what discriminates. RVQ at 9.9%
-storage is the first row that shows real task damage (−1.6 / −2.1 pt), consistent with its
-1.76× perplexity.
+Two things to read off this table.
 
-The last two rows are the interesting ones and are discussed below: **MMLU is bit-identical
-while HellaSwag falls to chance**, on the same head.
+**These tasks cannot rank head methods.** Look at `B1-s T=16384/tail-2b`: C4 perplexity
+**nearly doubles** (1.917×) and yet HellaSwag moves **+0.07** and MMLU **0.00**. A method
+selected on task accuracy alone would call that head free. At ~27% storage all three real
+methods sit inside ±0.36 pt on both tasks while C4 separates them 1.1 / 1.3 / 4.2%. C4
+perplexity is the discriminator; the tasks only certify "not catastrophic".
+
+**Except when rows go missing, and then HellaSwag is brutal.** The bottom three rows all
+drop or unread rows, and HellaSwag tracks the damage the coverage table predicts:
+T=32768 keeps 85.95% of endings fully in-tier → **−6.68 pt**; T=4096 keeps 9.35% →
+**−21.81 pt**, i.e. chance. MMLU stays bit-identical throughout. The mechanism is next.
 
 ---
 
@@ -188,11 +194,11 @@ buys it for free.
 **F2 (is low-rank really dead?).** The plan flagged that the exclusion rested on a
 *tied* 0.6B. Re-run untied:
 
-| rank | storage | whitened PPL | plain PPL |
-|---|---|---|---|
-| 256 (25% of d) | 25.17% | **81.823** (2.57×) | 7 827 (246×) |
-| 512 (50%) | 50.34% | 44.700 (1.40×) | 3 593 (113×) |
-| 768 (75%) | 75.51% | 35.096 (1.10×) | 1 676 (53×) |
+| rank | storage | whitened PPL | plain PPL | 30B whitened, same storage |
+|---|---|---|---|---|
+| 256 (25% of d) | 25.17% | **81.823** (2.57×) | 7 827 (246×) | **3.505×** |
+| 512 (50%) | 50.34% | 44.700 (1.40×) | 3 593 (113×) | **1.508×** |
+| 768 (75%) | 75.51% | 35.096 (1.10×) | 1 676 (53×) | *(running)* |
 
 **Kill criterion: "if low-rank at 25% storage lands within +5% PPL, low-rank returns to
 the shortlist."** It lands at **+157%**, against +4.2% for storage-matched INT4 — a
@@ -261,18 +267,24 @@ right. Measured with T=4096:
 HellaSwag collapses to **chance** (25%). The mechanism, measured with nothing but the
 tokenizer (`scripts/lm_head_task_coverage.py`):
 
-| T | HellaSwag: target tokens in tier | **endings *fully* in tier** | MMLU: targets in tier |
-|---|---|---|---|
-| 4 096 | 82.96% | **9.35%** | 100% |
-| 8 192 | 89.74% | 25.20% | 100% |
-| 16 384 | 95.29% | 53.73% | 100% |
-| 32 768 | 98.85% | 85.95% | 100% |
+| T | HellaSwag: target tokens in tier | **endings *fully* in tier** | measured HellaSwag (0.6B) | MMLU: targets in tier |
+|---|---|---|---|---|
+| 4 096 | 82.96% | **9.35%** | **25.48** (chance) | 100% |
+| 8 192 | 89.74% | 25.20% | — | 100% |
+| 16 384 | 95.29% | 53.73% | — | 100% |
+| 32 768 | 98.85% | 85.95% | **40.61** | 100% |
 
 HellaSwag endings average **13.7 tokens**. A strict head scores an ending at −inf unless
-*every* token is in-tier, so what its accuracy tracks is the "fully covered" column —
-9.35% at T=4096. With ~91% of all four candidates at −inf, `acc_norm` is picking among
-ties, hence chance. MMLU's targets are single tokens (" A".." D"), in-tier at every size,
-so its score is bit-identical.
+*every* token is in-tier, so what its accuracy tracks is the "fully covered" column, not
+the per-token one. At T=4096, 9.35% coverage → ~91% of all four candidates at −inf →
+`acc_norm` picks among ties → chance (25.48 measured against 25.0 expected). At T=32768,
+85.95% coverage predicts ≈ 0.86·47.29 + 0.14·25 = 44.2 against **40.61** measured — the
+right size and direction. MMLU's targets are single tokens (" A".." D"), in-tier at every
+size, so its score is bit-identical throughout.
+
+Note that T=32768 discards only **3.08%** of the dense probability mass and still costs
+6.68 pt. Mass is the wrong intuition for multi-token scoring: what matters is the
+probability that a *whole sequence* survives, and that decays like coverage^length.
 
 So: **multi-token-continuation tasks are valid detectors of sparse-head damage;
 single-token-answer tasks are not.** The practical upshot for the plan is stronger than it
