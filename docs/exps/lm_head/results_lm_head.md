@@ -443,9 +443,10 @@ Batch sizes were reduced (c4=2, hellaswag=8) so 61 GB of weights plus the
 `[bs, 2048, 151936]` logits tensor fit the free GPUs. Both metrics are computed per
 request, so this changes speed only, not the numbers.
 
-**Still running:** the MMLU column, on A100-Sagemaker —
-`results_eval/lm_head_sweep_30b_mmlu.json`, read with `scripts/show_sweep.py`. (F2's
-`d=2048` ladder is done; see [§ F2](#f2--f3--the-falsification-runs).)
+**Still running:** the MMLU column beyond its dense row (**80.94**, vs the 80.91 reference)
+— on A100-Sagemaker at `results_eval/lm_head_sweep_30b_mmlu.json`, read with
+`scripts/show_sweep.py`. Everything else on this model is complete, including the F2
+`d=2048` ladder ([§ F2](#f2--f3--the-falsification-runs)).
 
 ---
 
