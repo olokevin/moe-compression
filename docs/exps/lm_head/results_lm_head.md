@@ -20,11 +20,12 @@ different perplexity harnesses (lm-eval `word_perplexity` for the 30B, a fixed-w
 loop for the 0.6B), so compare down a column, never across.
 
 Two things matter here. First, **uniform INT4 is a much worse baseline than it looks** —
-it costs +9.7% on the 30B, 5× the penalty it pays on the 0.6B, so the naive floor is the
-thing to beat and both real methods clear it comfortably. Second, **the free static
-prior is genuinely competitive**: a token histogram plus "keep the top 4096 rows exact"
-lands within 0.6 pp of the published SOTA on the 30B and *beats* it on the 0.6B, at zero
-calibration cost beyond counting tokens.
+it costs +9.7% on the 30B, **2.3×** the penalty it pays on the 0.6B, and **5.2×** what
+frequency tiering costs at the same scale. The naive floor is the thing to beat and both
+real methods clear it comfortably. Second, **the free static prior is genuinely
+competitive**: a token histogram plus "keep the top 4096 rows exact" lands within 0.6 pp of
+the published SOTA on the 30B and *beats* it on the 0.6B, at zero calibration cost beyond
+counting tokens.
 
 **Two branches are now closed by measurement:**
 
@@ -397,13 +398,14 @@ a useful check that the harness and protocol are the same ones the plan's bar wa
 
 1. **The ordering reverses versus the 0.6B.** ARCHead wins by 0.6 pp here instead of
    losing by 0.2. Both still clear uniform INT4 by a wide margin, and that margin *grew*:
-   INT4 costs +9.7% here against +4.2% on the 0.6B. The larger head is harder to quantize
-   uniformly and more rewarding to treat structurally.
+   INT4's excess perplexity is +9.75% here against +4.16% on the 0.6B (2.3×), while B1-s
+   only goes +1.05% → +1.89%. The larger head is harder to quantize uniformly and more
+   rewarding to treat structurally.
 2. **Our ARCHead reproduction lands in family.** Rel PPL **1.013 at 26.9%** against the
    paper's **1.007 at 25.6%** on Qwen3-8B-Base, and our storage-matched INT4 (1.098) sits
    just under the 1.14–1.16 the paper reports for that comparison.
 3. **The activation metric is worth much more at scale.** Ablating it costs
-   1.013 → 1.071 (+5.7 pp of relative PPL) versus +2.3 pp on the 0.6B, and drops top-1
+   1.013 → 1.071 (+5.8 pp of relative PPL) versus +2.3 pp on the 0.6B, and drops top-1
    agreement 93.3% → 85.7%.
 4. **Everything below ~26% storage degrades far harder than on the 0.6B.** B1-s at 15.6%
    is rel 4.49 (0.6B: 2.46); RVQ at 1.58 b/w is rel 4.08 (0.6B: 1.76). The 30B head is
