@@ -205,7 +205,7 @@ def _lowrank_head(W, C, rank, whiten=True, compute_device="cpu"):
     return ((U * S.unsqueeze(0)) @ Vh).to(W.dtype)
 
 
-def run_ladder(model_id, calib_dir, n_tokens, out_json, runs=None):
+def run_ladder(model_id, calib_dir, n_tokens, out_json, runs=None, ppl_batch=4):
     """Measure held-out C4 PPL for every head treatment on one loaded model."""
     os.makedirs(calib_dir, exist_ok=True)
     m, tok = load(model_id)
@@ -235,9 +235,16 @@ def run_ladder(model_id, calib_dir, n_tokens, out_json, runs=None):
 
     results = []
 
-    def measure(name, bpw, read_rows=None, read_bpw=None, extra=None):
+    def measure(name, bpw, read_rows=None, read_bpw=None, extra=None, extra_after=None):
+        """``extra_after`` is a *callable*, evaluated after the PPL pass.
+
+        Anything accumulated by the forward during the measurement (S1's
+        argmax-in-candidate rate) has to be read afterwards. Passing it through
+        ``extra`` silently records the counters' pre-run state -- which is zero, and
+        looks like a measurement.
+        """
         t0 = time.time()
-        ppl, oov = c4_ppl(m, tok, n_tokens=n_tokens)
+        ppl, oov = c4_ppl(m, tok, n_tokens=n_tokens, batch=ppl_batch)
         cost = head_cost(V, D, bpw, read_rows=read_rows, read_bits_per_weight=read_bpw)
         row = {
             "run": name, "ppl": ppl, "oov_rate": oov,
@@ -249,6 +256,7 @@ def run_ladder(model_id, calib_dir, n_tokens, out_json, runs=None):
             "bits_per_weight": bpw, "secs": round(time.time() - t0, 1),
         }
         row.update(extra or {})
+        row.update(extra_after() if extra_after is not None else {})
         results.append(row)
         _print(f"  -> {name}: PPL {ppl:.4f}, storage {100 * row['storage_frac']:.2f}%, "
                f"reads {100 * row['read_frac']:.2f}%, Δactive {row['delta_active_pct']:+.2f}%")
@@ -357,6 +365,47 @@ def run_ladder(model_id, calib_dir, n_tokens, out_json, runs=None):
         measure("B3-vql-K1024", s["bits_per_weight"], extra=dict(s))
         restore()
 
+    # S1 -- screen-and-refine. The only ladder row that changes *reads* rather than the
+    # weight, so it is measured through the installed forward, not a modified W.
+    if want("S1"):
+        from src.lm_head.screen_refine import build_screen_refine, screen_refine_cost
+        from src.lm_head.install import _screen_refine_forward, bind_head_forward
+        for basis in ("ceig", "raw"):
+            U, col, static_score, _ = build_screen_refine(
+                W0.float().cpu(), C, basis=basis, verbose=True)
+            for r0f, N, static in ((0.1875, 8192, False), (0.125, 16384, False),
+                                   (0.0625, 8192, False), (0.1875, 8192, True)):
+                if static and basis != "ceig":
+                    continue
+                sc = screen_refine_cost(V, D, max(1, round(r0f * D)), N)
+                tag = (f"S1-{basis}-r{sc['screen_rank']}-N{N // 1024}k"
+                       + ("-staticscreen" if static else ""))
+                _print(f"\n--- {tag}: reads {100 * sc['read_param_frac']:.2f}% "
+                       f"of V*D, storage {100 * sc['stored_param_frac']:.2f}% ---")
+                head._sr_U = U.to(device=head.weight.device, dtype=head.weight.dtype)
+                head._sr_col = col.to(device=head.weight.device, dtype=head.weight.dtype)
+                head._sr_sel = (static_score.topk(sc["screen_rank"]).indices
+                                .to(head.weight.device) if static else None)
+                head._sr_cand_idx = None
+                head._sr_tail = "coarse"
+                head._sr_rank, head._sr_cand = sc["screen_rank"], sc["cand_size"]
+                head._sr_shift, head._sr_chunk = 0.0, 256
+                head._sr_stats = {"tokens": 0, "argmax_in_cand": 0, "mass_outside_cand": 0.0}
+                bind_head_forward(head, _screen_refine_forward)
+                st = head._sr_stats
+                measure(tag, sc["bits_per_weight"],
+                        read_rows=round(sc["read_params"] / D), read_bpw=16.0,
+                        extra={"screen_rank": sc["screen_rank"], "cand_size": N,
+                               "basis": basis, "static_screen": static,
+                               "read_param_frac": sc["read_param_frac"],
+                               "stored_param_frac": sc["stored_param_frac"]},
+                        extra_after=lambda st=st: {
+                            "eval_tokens": st["tokens"],
+                            "eval_argmax_in_cand": st["argmax_in_cand"] / max(st["tokens"], 1),
+                            "eval_mass_outside_cand": st["mass_outside_cand"] / max(st["tokens"], 1),
+                        })
+                restore()
+
     _print(f"\n[ladder] wrote {len(results)} rows to {out_json}")
     return results
 
@@ -368,6 +417,11 @@ def main():
     ap.add_argument("--gates", action="store_true")
     ap.add_argument("--ladder", action="store_true")
     ap.add_argument("--ppl-tokens", type=int, default=262144)
+    ap.add_argument("--ppl-batch", type=int, default=4,
+                    help="windows per forward. The [b, 1024, 151936] logits tensor is "
+                         "materialized three times (bf16, float, log_softmax), so this "
+                         "is the knob that decides whether the ladder fits. Perplexity "
+                         "is batch-invariant.")
     ap.add_argument("--out", default="./results_eval/lm_head_ladder.json")
     ap.add_argument("--only", nargs="*", default=None,
                     help="substring filter over run names, e.g. --only B1-a B2")
@@ -381,7 +435,8 @@ def main():
         gate_0d(a.model, a.calib_dir)
         _print("\n✅ ALL MODEL-LEVEL GATES PASSED")
     if a.ladder:
-        run_ladder(a.model, a.calib_dir, a.ppl_tokens, a.out, runs=a.only)
+        run_ladder(a.model, a.calib_dir, a.ppl_tokens, a.out, runs=a.only,
+                   ppl_batch=a.ppl_batch)
 
 
 if __name__ == "__main__":

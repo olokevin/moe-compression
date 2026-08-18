@@ -183,12 +183,24 @@ def ensure_sigma(model, tokenizer, cfg, calib_dir, verbose=True):
 
     if os.path.exists(path):
         payload = torch.load(path, map_location="cpu")
-        if verbose:
+        if "n_pad_skipped" not in payload:
+            # Pre-dates the padding fix, so both C and the H sample include right-pad
+            # positions -- 45% of the batch grid on this recipe. A pad state argmaxes
+            # onto rare tokens, which wrecks every diagnostic computed from H (the
+            # discarded-mass figure read 40.0% where the truth was 19.4%). Recollect
+            # rather than silently reuse it; the stale file is left on disk untouched.
             _print(
-                f"[lm_head/calib] sigma loaded from {path}: "
-                f"C {tuple(payload['C'].shape)} over {int(payload['n']):,} states"
+                f"[lm_head/calib] ⚠️  {path} has no pad accounting -- it was written "
+                f"before padding positions were excluded, so its C and H are "
+                f"contaminated. Recollecting."
             )
-        return payload["C"], payload["H"]
+        else:
+            if verbose:
+                _print(
+                    f"[lm_head/calib] sigma loaded from {path}: "
+                    f"C {tuple(payload['C'].shape)} over {int(payload['n']):,} states"
+                )
+            return payload["C"], payload["H"]
 
     os.makedirs(calib_dir, exist_ok=True)
     norm = find_final_norm(model)

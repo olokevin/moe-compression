@@ -2,6 +2,16 @@
 
 Implementation of [`plan/baselines.md`](plan/baselines.md). Code in `src/lm_head/`.
 
+> **Follow-up, and a partial correction:** the conclusion below — *"the parameter count is
+> irreducible; only precision is compressible"* — holds for **stored** parameters (and
+> [`results_s1_screen_refine.md`](results_s1_screen_refine.md) closes four families at 25%
+> storage, not the two tested here) but is **wrong for reads**. §1c closes sparse
+> activation on the strength of B1-a, whose failure is attributable ~97% to *which* rows it
+> read (a static frequency tier) and to its `−inf` tail, not to reading few rows. Choosing
+> the read set **per token** and keeping a **graded** tail gives 23.8% of reads at C4
+> ×1.0017 and HellaSwag **+0.00** on the 0.6B, and KL 0.0003 at 24.5% of reads on the 30B.
+> See [`results_s1_screen_refine.md`](results_s1_screen_refine.md).
+
 ---
 
 ## The short version

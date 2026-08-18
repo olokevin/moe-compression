@@ -19,6 +19,7 @@ TASKS = {
     "hellaswag": ("hellaswag", 0, -1, 16),
     "mmlu": ("mmlu", 5, -1, 8),
     "c4": ("c4", 0, 500, 16),
+    "arc_challenge": ("arc_challenge", 0, -1, 16),
 }
 
 # variant -> the prune_kwargs.lm_head block. Phase 1 (B1), 2 (B2), 3 (B3), F3.
@@ -64,6 +65,33 @@ VARIANTS = {
     "f2_lr50":        dict(method="lowrank", rank_frac=0.50, whiten=True),
     "f2_lr75":        dict(method="lowrank", rank_frac=0.75, whiten=True),
     "f2_lr25_plain":  dict(method="lowrank", rank_frac=0.25, whiten=False),
+    # --- S1: screen-and-refine -- dynamic reads with a graded tail ---------- #
+    # The read fraction is r0/D + N*(D-r0)/(V*D) + D/V, so on a d=1024 head
+    # (192, 8192) = 23.8% and on d=2048 (384, 8192) = 22.9%. screen_rank is given as
+    # a FRACTION of D for the same reason f2 uses rank_frac: an absolute rank means a
+    # different read budget on the two models.
+    "s1_r25_n8k":     dict(method="screen_refine", screen_rank_frac=0.1875,
+                           cand_size=8192, basis="ceig"),
+    "s1_r25_n16k":    dict(method="screen_refine", screen_rank_frac=0.125,
+                           cand_size=16384, basis="ceig"),
+    "s1_r12_n8k":     dict(method="screen_refine", screen_rank_frac=0.0625,
+                           cand_size=8192, basis="ceig"),
+    # zero-calibration variant: no rotation, so no eigendecomposition of C
+    "s1_r25_n8k_raw": dict(method="screen_refine", screen_rank_frac=0.1875,
+                           cand_size=8192, basis="raw"),
+    # ablation: static screen subspace (= a low-rank sketch) instead of per-token
+    "s1_r25_n8k_static": dict(method="screen_refine", screen_rank_frac=0.1875,
+                              cand_size=8192, basis="ceig", screen="static"),
+    # ablation: the doc's B1-a candidate set (static frequency tier) with S1's graded
+    # tail -- isolates "dynamic candidates" from "graded tail"
+    "s1_freq_n8k":    dict(method="screen_refine", screen_rank_frac=0.1875,
+                           cand_size=8192, basis="ceig", cand_source="freq"),
+    # ablation: S1's candidate set, ungraded (-inf) tail -- must reproduce B1-a's inf
+    "s1_r25_n8k_inf": dict(method="screen_refine", screen_rank_frac=0.1875,
+                           cand_size=8192, basis="ceig", tail="inf"),
+    # gate: r0 = D and N = V must reproduce the dense head exactly
+    "s1_identity":    dict(method="screen_refine", screen_rank_frac=1.0,
+                           cand_size=151936, basis="ceig"),
 }
 
 # Phase 5 -- the best head method composed with the repo's -73% expert config.

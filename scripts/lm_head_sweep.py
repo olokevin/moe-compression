@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import torch
 
+from scripts.arc_dataset_compat import install_arc_parquet_shim
 from src.base.shared_utils import _print
 from src.lm_head import unbind_head_forward
 from src.lm_head.accounting import count_active_params, head_cost
@@ -36,6 +37,7 @@ TASK_PROTOCOL = {
     "c4": (0, 500, 16),
     "winogrande": (0, -1, 16),
     "arc_easy": (0, -1, 16),
+    "arc_challenge": (0, -1, 16),
 }
 
 
@@ -74,8 +76,14 @@ def main():
     ap.add_argument("--variants", nargs="+", default=["dense", "f3_rtn4", "b1s_t4k_tail4",
                                                      "b2_25", "b1a_t4k"])
     ap.add_argument("--out", default="./results_eval/lm_head_sweep.json")
-    ap.add_argument("--sigma-batches", type=int, default=32)
-    ap.add_argument("--sigma-batch-size", type=int, default=8)
+    # Defaults match the recipe every published number in results_lm_head.md uses.
+    # A smaller recipe silently changes the activation metric AND the diagnostic H
+    # sample, so it is not a free knob.
+    ap.add_argument("--sigma-batches", type=int, default=128)
+    ap.add_argument("--sigma-batch-size", type=int, default=16)
+    ap.add_argument("--sr-chunk", type=int, default=None,
+                    help="screen_refine forward chunk (flattened positions). Lower it "
+                         "when the logits tensor plus S1's two temporaries do not fit.")
     ap.add_argument("--no-shard", action="store_true")
     ap.add_argument("--limit", type=int, default=None,
                     help="override eval_sample_limit for every task (smoke tests)")
@@ -95,6 +103,7 @@ def main():
         TASK_PROTOCOL[task] = (fs, lim, int(n))
         _print(f"[sweep] batch size for {task} -> {int(n)}")
 
+    install_arc_parquet_shim()
     os.makedirs(a.calib_dir, exist_ok=True)
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
 
@@ -124,8 +133,11 @@ def main():
         "sigma_batches": a.sigma_batches, "sigma_batch_size": a.sigma_batch_size,
     }}
     counts = ensure_unigram(tok, calib_cfg, a.calib_dir, V)
-    need_sigma = any(VARIANTS[v]["method"] in ("archead", "rvq", "vq_logits")
-                     for v in a.variants if v in VARIANTS)
+    need_sigma = any(
+        VARIANTS[v]["method"] in ("archead", "rvq", "vq_logits")
+        or (VARIANTS[v]["method"] == "screen_refine"
+            and VARIANTS[v].get("basis", "ceig") != "raw")
+        for v in a.variants if v in VARIANTS)
     C = H = None
     if need_sigma:
         C, H = ensure_sigma(model, tok, calib_cfg, a.calib_dir)
@@ -161,13 +173,18 @@ def main():
                 "enabled": True, "calib_dir": a.calib_dir, "compute_device": "cpu",
                 "diagnostics": True, "calib_kwargs": calib_cfg["calib_kwargs"],
             })
+            if a.sr_chunk is not None:
+                cfg["forward_chunk"] = a.sr_chunk
             from src.lm_head import install_lm_head
             install_lm_head(model, cfg, tokenizer=tok, verbose=True)
             rep = model._lm_head_report
             for k in ("storage_frac_of_bf16", "read_frac_of_bf16", "bits_per_weight",
                       "top1_agreement", "kl_vs_dense", "kl_in_tier", "logit_mse",
                       "dense_mass_outside_tier", "rel_metric_err", "rel_fro_err",
-                      "calib_head_mass", "calib_tail_mass", "tier_size", "n_used_codes"):
+                      "calib_head_mass", "calib_tail_mass", "tier_size", "n_used_codes",
+                      "screen_rank", "cand_size", "basis", "screen", "cand_source",
+                      "dense_mass_outside_cand", "dlogp_sampled_target",
+                      "stored_param_frac", "read_param_frac"):
                 if k in rep:
                     row[k] = rep[k]
             row["storage_frac"] = rep["storage_frac_of_bf16"]
@@ -202,8 +219,7 @@ def main():
         from src.lm_head import lm_head_eval_stats
         st = lm_head_eval_stats(model)
         if st:
-            row["argmax_in_tier"] = st["argmax_in_tier"]
-            row["eval_tokens"] = st["eval_tokens"]
+            row.update({k: v for k, v in st.items()})
             _print(f"[sweep] tier hit-rate over the eval stream: "
                    f"{100 * st['argmax_in_tier']:.2f}% of argmaxes were in-tier")
         flush()
