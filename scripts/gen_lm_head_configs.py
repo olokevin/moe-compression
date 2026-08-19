@@ -92,7 +92,36 @@ VARIANTS = {
     # gate: r0 = D and N = V must reproduce the dense head exactly
     "s1_identity":    dict(method="screen_refine", screen_rank_frac=1.0,
                            cand_size=151936, basis="ceig"),
+    # --- S1 low-read ladder: where does the method actually break? ---------- #
+    # Named by r0 = D/<n> and the candidate count, which is model-independent --
+    # unlike the s1_r25/r12 names above, which follow the older read-% convention
+    # and therefore mean slightly different budgets on d=1024 vs d=2048.
+    #
+    # reads = r0/D + N*(D-r0)/(V*D) + D/V, so BOTH knobs have a floor: the
+    # candidate set alone costs N/V (5.39% at N=8192) and the rotation costs D/V
+    # (1.35% on the 30B). Below ~7% the ladder has to shrink N as well as r0.
+    "s1_d32_n8k":     dict(method="screen_refine", screen_rank_frac=1 / 32,
+                           cand_size=8192, basis="ceig"),
+    "s1_d16_n2k":     dict(method="screen_refine", screen_rank_frac=1 / 16,
+                           cand_size=2048, basis="ceig"),
+    "s1_d32_n4k":     dict(method="screen_refine", screen_rank_frac=1 / 32,
+                           cand_size=4096, basis="ceig"),
+    "s1_d64_n4k":     dict(method="screen_refine", screen_rank_frac=1 / 64,
+                           cand_size=4096, basis="ceig"),
+    "s1_d64_n2k":     dict(method="screen_refine", screen_rank_frac=1 / 64,
+                           cand_size=2048, basis="ceig"),
+    "s1_d128_n2k":    dict(method="screen_refine", screen_rank_frac=1 / 128,
+                           cand_size=2048, basis="ceig"),
+    "s1_d128_n1k":    dict(method="screen_refine", screen_rank_frac=1 / 128,
+                           cand_size=1024, basis="ceig"),
+    "s1_d256_n1k":    dict(method="screen_refine", screen_rank_frac=1 / 256,
+                           cand_size=1024, basis="ceig"),
 }
+
+# The S1 read ladder, in the order the curve should be drawn (high -> low reads).
+S1_LADDER = ["s1_r25_n8k", "s1_r25_n16k", "s1_r12_n8k", "s1_d32_n8k", "s1_d16_n2k",
+             "s1_d32_n4k", "s1_d64_n4k", "s1_d64_n2k", "s1_d128_n2k", "s1_d128_n1k",
+             "s1_d256_n1k"]
 
 # Phase 5 -- the best head method composed with the repo's -73% expert config.
 COMPOSED_EXPERT = {
