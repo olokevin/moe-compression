@@ -668,7 +668,8 @@ pre-registered bars were set in. `aic` = argmax-in-candidate over the eval strea
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | dense BF16 | — | 100% | 100% | — | **25.349** | 1.000 | **78.57** | — | **58.87** | — | — | — |
 | **S1 r0=384 N=8192** | reads | 101.35% | **24.48%** | **−7.01%** | **25.348** | **1.000** | **78.57** | **+0.00** | **58.87** | **+0.00** | .0003 | **100.000%** |
-| **S1 r0=128 N=8192** | reads | 101.35% | **12.65%** | **−8.11%** | **25.430** | **1.003** | — | — | **58.79** | **−0.09** | .0013 | 100.000% |
+| **S1 r0=128 N=8192** | reads | 101.35% | **12.65%** | **−8.11%** | **25.430** | **1.003** | 78.52 | −0.05 | **58.79** | **−0.09** | .0013 | 100.000% |
+| S1 r0=128, `raw` + *no col-norm* (`\|h_i\|` only) | reads | 101.35% | **12.65%** | −8.11% | 26.803 | 1.057 | 77.93 | −0.64 | 58.28 | −0.60 | **.0275** | 100.000% |
 | S1 *static screen* | reads | 101.35% | 24.48% | −7.01% | 25.405 | 1.002 | 78.51 | −0.06 | 58.70 | −0.17 | .0011 | 100.000% |
 | S1 *frequency-tier candidates* | reads | 101.35% | 24.48% | −7.01% | 33.261 | 1.312 | — | — | 53.24 | −5.63 | .2082 | 88.771% |
 | **F2 low-rank r=512** | **params** | **25.34%** | 25.34% | −6.93% | **88.665** | **3.498** | **60.04** | **−18.53** | **38.48** | **−20.39** | 1.019 | — |
@@ -678,7 +679,19 @@ pre-registered bars were set in. `aic` = argmax-in-candidate over the eval strea
 **At a quarter of the reads, all three metrics are indistinguishable from dense** —
 perplexity 0.001 *lower* (noise), HellaSwag and ARC-C identical to two decimals. The screen
 did not miss the dense argmax once over the whole eval stream. At **12.65%** of reads the
-cost is still ×1.003 / −0.09 pt.
+cost is still ×1.003 / −0.05 pt.
+
+**The screen scoring is load-bearing — pure activation magnitude is not enough.** The
+`raw`+*no col-norm* row keeps the top-`r0` entries of `h` ranked by `|h_i|` **alone**:
+no `ceig` rotation and no `‖W u_i‖` weight, i.e. "directly select the hidden-state entries
+by magnitude." At the same 12.65% read budget it is **21× worse in KL** (.0275 vs .0013) and
+**+5.7% C4** (×1.057 vs ×1.003), against S1's two scoring ingredients together. Tasks move
+less than perplexity — HellaSwag −0.64, ARC-C −0.60 — because the graded tail plus the exact
+refine keep every token emittable (argmax-in-candidate stays 100.000%); the damage lands in
+the *whole-distribution* fit that perplexity sees. So the rotation and the column-norm are
+doing real work: the naive "big activations matter most" screen would blow the C4 +1% clause,
+where the full S1 screen clears it by 3×. This is gate 0g's `|coef|`-only score, now measured
+on the real 30B head instead of a synthetic matrix.
 
 **The head-to-head the goal asks for**, at matched ~25% of the head:
 
@@ -742,6 +755,7 @@ Install-only, so these are cheap and cover every variant.
 | **S1 r0=384 N=16384** | 101.35% | **23.28%** | **−7.12%** | **0.0002** | **100.00%** | **0.042%** | 0.00035 |
 | **S1 r0=384 N=8192** | 101.35% | **24.48%** | **−7.01%** | **0.0003** | **100.00%** | 0.132% | 0.00251 |
 | S1 r0=128 N=8192 | 101.35% | **12.65%** | −8.11% | 0.0013 | 100.00% | 0.164% | 0.00391 |
+| S1 r0=128, `raw` + *no col-norm* (`\|h_i\|` only) | 101.35% | **12.65%** | −8.11% | **0.0275** | 100.00% | 0.462% | 0.04452 |
 | S1 r0=384 N=8192, *static screen* | 101.35% | 24.48% | −7.01% | 0.0011 | 100.00% | 0.155% | 0.00155 |
 | S1 r0=384 N=8192, `raw` | 101.35% | 24.48% | −7.01% | 0.0014 | 100.00% | 0.168% | 0.00245 |
 | S1, *frequency-tier candidates* | 101.35% | 24.48% | −7.01% | **0.2082** | 92.63% | 11.691% | 0.28758 |
@@ -813,9 +827,15 @@ certify "not catastrophic". This is the same lesson as `B1-s T=16384/tail-2b` in
 [§"What the benchmarks can and cannot see"](#what-the-benchmarks-can-and-cannot-see),
 now on a third axis.
 
-**Qwen3-30B-A3B:** the matching ladder (9.70% → 2.41%) is running on A100-New; the
-diagnostics predict a later cliff, since its KL at 12.65% is 0.0013 against the 0.6B's
-0.0072 at the same budget.
+**Qwen3-30B-A3B:** the prediction of a later cliff holds. At the **12.65%** budget the same
+crude `|hᵢ|`-only screen costs **KL 0.0275** — 21× the real screen's 0.0013 and **×1.057 C4**,
+measurably worse but far milder than the 0.6B's 86×, exactly because the larger head's base-S1
+KL is lower there (0.0013 vs 0.0072). Tasks barely move (HellaSwag −0.64, ARC-C −0.60) since
+the graded tail keeps argmax-in-candidate at 100.000%; the loss lives in perplexity. See the
+[primary-target](#qwen3-30b-a3b--the-primary-target) and
+[diagnostics](#qwen3-30b-a3b--diagnostics-2048-calibration-states) tables (variant
+`s1_r12_n8k_mag`, `run_results/lm_head_s1_30b_mag.json`). The lower-read ladder (9.70% → 2.41%)
+is a separate run.
 
 ## 3f. Ablations that attribute the win
 

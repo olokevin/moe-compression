@@ -176,7 +176,19 @@ def main():
             if a.sr_chunk is not None:
                 cfg["forward_chunk"] = a.sr_chunk
             from src.lm_head import install_lm_head
-            install_lm_head(model, cfg, tokenizer=tok, verbose=True)
+            try:
+                install_lm_head(model, cfg, tokenizer=tok, verbose=True)
+            except Exception as e:
+                # Same reasoning as the eval loop below: one broken variant must not
+                # discard the whole sweep. A meta-tensor head (offloaded because the box
+                # was contended at load time) fails EVERY treatment while leaving the
+                # dense row healthy, which used to cost a 40-minute run its 8 variants.
+                _print(f"[sweep] ⚠️  {variant} INSTALL FAILED: {type(e).__name__}: {e}")
+                row["install_error"] = f"{type(e).__name__}: {e}"
+                row["build_secs"] = round(time.time() - t0, 1)
+                rows.append(row)
+                flush()
+                continue
             rep = model._lm_head_report
             for k in ("storage_frac_of_bf16", "read_frac_of_bf16", "bits_per_weight",
                       "top1_agreement", "kl_vs_dense", "kl_in_tier", "logit_mse",

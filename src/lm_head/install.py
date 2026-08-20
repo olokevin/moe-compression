@@ -42,6 +42,46 @@ def _get_input_embedding(model):
     return None
 
 
+def _require_materialized_head(model, head):
+    """Fail early and legibly if ``lm_head.weight`` is a meta/offloaded placeholder.
+
+    Every method here reads the head's weight *outside* a forward pass, so an offloaded
+    head is fatal. But it fails deep inside a build with
+
+        NotImplementedError: Cannot copy out of meta tensor; no data!
+
+    which says nothing about the cause. And the *dense* rows of a sweep still work,
+    because accelerate materializes offloaded weights on the fly during ``forward`` --
+    so a contended box produces a run where the reference passes and every treatment
+    dies 40 minutes in.
+
+    The cause is always the same: ``device_map='auto'`` could not fit the model in the
+    visible GPU memory (usually because another job is resident on one of the picked
+    GPUs) and pushed layers to ``meta``/disk.
+    """
+    w = getattr(head, "weight", None)
+    offloaded = w is not None and (w.is_meta or w.device.type == "meta")
+    dm = getattr(model, "hf_device_map", None) or {}
+    bad = sorted({str(v) for v in dm.values()} & {"meta", "disk", "cpu"})
+    if not offloaded:
+        if bad:
+            _print(f"[lm_head] ⚠️  device_map offloads some modules to {bad} -- the head "
+                   f"itself is materialized on {w.device}, so this run is fine, but the "
+                   f"box is tight on GPU memory")
+        return
+    raise RuntimeError(
+        "lm_head.weight is a meta tensor: accelerate offloaded the head instead of "
+        "placing it on a GPU, so its values are not available to read.\n"
+        f"  hf_device_map placements in use: {bad or 'unknown'}\n"
+        "  Cause: device_map='auto' could not fit the model in the visible GPU memory "
+        "-- most often another job is already resident on one of the selected GPUs.\n"
+        "  Fix: give the run more/emptier GPUs (check nvidia-smi first), or cap "
+        "accelerate's budget with PER_GPU_MEM so it shards evenly instead of "
+        "offloading. Note the DENSE rows of a sweep will run fine either way, so a "
+        "passing dense row is not evidence the placement is healthy."
+    )
+
+
 def _untie_if_needed(model, head, verbose=True):
     """Give ``lm_head`` its own weight storage if it is tied to the input embedding.
 
@@ -355,6 +395,7 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
         raise ValueError(f"unknown lm_head method {method!r}; expected one of {_METHODS}")
 
     head = get_lm_head(model)
+    _require_materialized_head(model, head)
     was_tied, untie_cost = _untie_if_needed(model, head, verbose=verbose)
     W = head.weight
     V, D = W.shape
