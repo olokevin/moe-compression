@@ -484,6 +484,15 @@ def install_lm_head(model, cfg: dict, tokenizer=None, args=None, verbose: bool =
             ridge=float(cfg.get("ridge", 1e-3)), compute_device=compute_device,
             verbose=verbose,
         )
+        # Ablation: rank the screen by |coef_i| alone, dropping the ||W u_i|| factor.
+        # With basis="raw" (U=I) coef=h, so this selects the top-r0 *hidden-state
+        # entries by magnitude* directly -- gate 0g's |coef|-only score promoted to a
+        # full sweep variant instead of a synthetic-W diagnostic. The read/storage
+        # accounting is unchanged, so it slots in at the same budget as its basis="raw"
+        # (col-norm-weighted) and basis="ceig" siblings.
+        if not bool(cfg.get("screen_use_col_norm", True)):
+            col_norm = torch.ones_like(col_norm)  # affects only the adaptive screen
+            s["screen_use_col_norm"] = False
         # screen_rank_frac is a fraction of D so one variant name means the same read
         # budget on a d=1024 and a d=2048 head -- the mistake f2_lr25 made (bug 6).
         if cfg.get("screen_rank_frac") is not None:

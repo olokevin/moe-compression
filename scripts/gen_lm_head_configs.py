@@ -79,6 +79,13 @@ VARIANTS = {
     # zero-calibration variant: no rotation, so no eigendecomposition of C
     "s1_r25_n8k_raw": dict(method="screen_refine", screen_rank_frac=0.1875,
                            cand_size=8192, basis="raw"),
+    # ablation: "directly select the hidden-state entries by magnitude" -- raw basis
+    # (U=I, so coef=h) AND no ||W u_i|| weighting, so the screen keeps the top-r0 entries
+    # of h ranked by |h_i| alone. Isolates the value of S1's two scoring ingredients (the
+    # ceig rotation and the column-norm weight); read/storage accounting is identical to
+    # s1_r12_n8k, so it lands at the same 12.65%-reads budget on the d=2048 (30B) head.
+    "s1_r12_n8k_mag": dict(method="screen_refine", screen_rank_frac=0.0625,
+                           cand_size=8192, basis="raw", screen_use_col_norm=False),
     # ablation: static screen subspace (= a low-rank sketch) instead of per-token
     "s1_r25_n8k_static": dict(method="screen_refine", screen_rank_frac=0.1875,
                               cand_size=8192, basis="ceig", screen="static"),

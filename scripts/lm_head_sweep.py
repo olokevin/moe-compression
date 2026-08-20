@@ -183,6 +183,7 @@ def main():
                       "dense_mass_outside_tier", "rel_metric_err", "rel_fro_err",
                       "calib_head_mass", "calib_tail_mass", "tier_size", "n_used_codes",
                       "screen_rank", "cand_size", "basis", "screen", "cand_source",
+                      "screen_use_col_norm",
                       "dense_mass_outside_cand", "dlogp_sampled_target",
                       "stored_param_frac", "read_param_frac"):
                 if k in rep:

@@ -47,7 +47,7 @@ of subspaces), and none of them comes close.
 ⚠️ **Novelty of S1 is not established.** The screen-and-refine *skeleton* is close to
 SVD-softmax (Shim et al., NeurIPS 2017): low-rank preview → candidate set → exact
 rescoring. What is new here is the **per-token adaptive screen** and the activation-whitened
-rotation — and [§3e](#3e-ablations-that-attribute-the-win) shows that component is the
+rotation — and [§3f](#3f-ablations-that-attribute-the-win) shows that component is the
 *smallest* of S1's three departures from B1-a. Run a literature check before claiming the
 method.
 
@@ -219,7 +219,7 @@ is the honest number, not an artifact.
 
 The 0.6B row is the instructive one: discarding just **3.08%** of the dense probability mass
 still costs **6.67 pt** of HellaSwag. Mass is the wrong intuition for multi-token scoring;
-see [1d](#1d-why-both-fail-coveragelength-not-mass). On the 30B the same `T` costs
+see [1d](#1d-why-1b-and-1c-fail-coveragelength-not-mass). On the 30B the same `T` costs
 **18.41 pt** — the larger head has a heavier tail it cannot afford to lose.
 
 ## 1c. Static sparse activation — reads 2.7%, perplexity ∞
@@ -314,7 +314,8 @@ full-rank — is untested by both. This section tests it and three others.
 
 **The bar, made precise.** Since `E_h‖(W−Ŵ)h‖² = ‖(W−Ŵ)C^{1/2}‖_F²`, every storage method
 reduces to a relative Frobenius error on the activation-whitened head — no eval needed. On
-this head the diagnostics in [§2d](#2d-diagnostics) pin **KL ≈ 9.5 · relerr²** (static
+this head the diagnostics in [§2d](#2d-diagnostics-2048-held-out-post-norm-states-06b) pin
+**KL ≈ 9.5 · relerr²** (static
 low-rank at `r=256/384/512` gives relerr² = .1014/.0714/.0494 against measured
 KL = 1.092/.676/.422), and PPL ratio ≈ `exp(KL)`. A 4-bit head sits at KL .0415. So **a
 25%-storage representation must reach relerr ≤ ~7%** to compete with 4 bits, and ≤10% to be
@@ -760,7 +761,63 @@ argmax, because HellaSwag and ARC-C score a **given** continuation whose tokens 
 low-probability — exactly the ones most likely to fall outside a candidate set. At 0.0025
 nats it is negligible, which is why the task columns come out at +0.00.
 
-## 3e. Ablations that attribute the win
+## 3e. How low can the read budget go?
+
+![ARC-C and KL vs read fraction](figures/fig_s1_read_curve_arc_challenge.png)
+
+`scripts/lm_head_read_ladder.py` prints each variant's true budget; the ladder shrinks
+**both** knobs because each has a floor — the candidate set alone costs `N/V` (5.39% at
+`N=8192`) and the rotation costs `D/V` (1.35% on the 30B). Below ~7% of reads, `N` has to
+come down too.
+
+**Qwen3-0.6B, ARC-C (dense 34.47 ± 1.39):**
+
+| `r0` | `N` | reads | ARC-C | Δ | KL | argmax-in-cand |
+|---|---|---|---|---|---|---|
+| 192 | 8192 | 23.80% | 34.30 | −0.17 | .0017 | 100.000% |
+| 64 | 8192 | 11.98% | 34.22 | −0.26 | .0072 | 100.000% |
+| **32** | **8192** | **9.02%** | **34.47** | **+0.00** | .0269 | 99.952% |
+| 64 | 2048 | 8.19% | 33.87 | −0.60 | .0344 | 99.919% |
+| 32 | 4096 | 6.41% | 33.79 | −0.68 | .0650 | 99.815% |
+| 16 | 4096 | 4.89% | 33.53 | −0.94 | .2093 | 99.100% |
+| 16 | 2048 | 3.56% | 33.02 | −1.45 | .3950 | 97.642% |
+| **8** | **2048** | **2.79%** | **32.94** | **−1.54** | .8579 | 94.905% |
+| 8 | 1024 | 2.12% | **28.50** | **−5.97** | 1.2825 | 90.916% |
+| 4 | 1024 | 1.74% | **25.77** | **−8.70** | 2.0359 | 85.586% |
+
+Three regimes:
+
+1. **Free down to ~9% of reads** — 34.47, exactly dense, and every point above 3.5% is
+   inside dense's ±1 stderr band.
+2. **Graceful between ~9% and ~2.8%** — the curve bends but never breaks; −1.54 pt at
+   2.79%.
+3. **Cliff below ~2.8%** — 2.12% costs −5.97 and 1.74% is at chance (25.00). This is where
+   the screen stops finding the right candidates: argmax-in-candidate falls through ~91%.
+
+**Two comparisons worth stating.** At **2.79%** of reads S1 scores 32.94 — the same as row
+pruning, which stores 21.57% and reads 8× more. And at essentially B1-a's own read budget
+(2.79% vs its 2.70%), S1 scores **32.94 against B1-a's 26.79**: +6.15 pt for the same
+number of reads, which is §3a's diagnosis measured at the extreme.
+
+**The task score alone would mislead you, and the KL panel is why the figure has two
+rows.** ARC-C stays inside its own noise band down to 3.5% while KL rises 20×, so a
+task-only reading would call a 4%-read head free. The right landmark: **S1's KL crosses the
+4-bit head's 0.0415 at ~8% of reads** — below that, the distribution is measurably worse
+than a 4-bit head even though ARC-C has not noticed.
+
+An ablation makes the point unmissable. `s1_r12_n8k_mag` — the crudest possible screen,
+picking the top-`r0` entries of `h` by `|hᵢ|` with no rotation and no column norm — has
+**KL 0.6194, 86× worse** than the real screen at the identical 11.98% budget, and scores
+ARC-C **35.15 (+0.68)**, nominally *above* dense. Select on KL or perplexity; let the tasks
+certify "not catastrophic". This is the same lesson as `B1-s T=16384/tail-2b` in
+[§"What the benchmarks can and cannot see"](#what-the-benchmarks-can-and-cannot-see),
+now on a third axis.
+
+**Qwen3-30B-A3B:** the matching ladder (9.70% → 2.41%) is running on A100-New; the
+diagnostics predict a later cliff, since its KL at 12.65% is 0.0013 against the 0.6B's
+0.0072 at the same budget.
+
+## 3f. Ablations that attribute the win
 
 Turning each of S1's three departures from B1-a off, one at a time (0.6B, 23.80% reads):
 
@@ -787,7 +844,7 @@ Turning each of S1's three departures from B1-a off, one at a time (0.6B, 23.80%
 So B1-a's headline failure was ~97% attributable to *which rows it read*, not to *how few* —
 and §1c read that as the axis failing.
 
-## 3f. Composition, not competition
+## 3g. Composition, not competition
 
 S1 is orthogonal to Part 2: it changes *which* parameters are read, quantization changes *how
 wide* each is. A 4-bit S1 head would be ~26% of bytes **and** ~24% of reads, with the refine
@@ -873,7 +930,7 @@ pre-registered clauses pass on the primary target; MMLU is a formality (caveat 6
 - **Do not pursue any reduction of the head's *stored* parameter count** — §1e closes five
   families. The one untested idea is reusing the input embedding on an untied model
   (`lm_head_embed_reuse.py`).
-- **The two arms compose** (§3f) and that is the next experiment, not lower bits.
+- **The two arms compose** (§3g) and that is the next experiment, not lower bits.
 - Plan §7's fail clause asks for a **LoRA-recovery arm**. S1 makes it unnecessary for the
   read axis; it remains the right move for sub-4-bit storage.
 
@@ -886,7 +943,7 @@ pre-registered clauses pass on the primary target; MMLU is a formality (caveat 6
    point, not an excuse for not finding one.
 2. **S1's novelty is unverified** — see the warning in the short version. The skeleton is
    likely SVD-softmax (2017); the adaptive screen and the `ceig` rotation are the new parts,
-   and §3e shows they are worth 3.8× of a 100×-plus total.
+   and §3f shows they are worth 3.8× of a 100×-plus total.
 3. **S1's top-`N` selection is not charged.** Reads and FLOPs both fall ~4×, but an exact
    top-8192 over 151 936 logits per token is a real cost. No throughput measurement is
    claimed here; caveat 5 applies to S1 as much as to ARCHead.
@@ -960,9 +1017,9 @@ Recorded because most of them produced plausible-looking wrong numbers.
 | # | item | status |
 |---|---|---|
 | 1 | 30B **MMLU** column for the precision arm | **running** — dense done (**80.94**, matching 80.91); 4 variants to go. The same variants moved MMLU by 0.00 / +0.07 / −0.36 pt on the 0.6B, so this closes a formality. |
-| 2 | **S1 ⊕ quantization** (§3f) | **not run.** The obvious composition: ~26% of bytes and ~24% of reads together. The refine stage would read quantized rows, so its logits stop being exact and the errors add. |
+| 2 | **S1 ⊕ quantization** (§3g) | **not run.** The obvious composition: ~26% of bytes and ~24% of reads together. The refine stage would read quantized rows, so its logits stop being exact and the errors add. |
 | 3 | **Phase 5** — head ⊕ the repo's −73% expert config | **not run.** Configs exist (`*_lmhead_*_composed_*.yaml`). The arithmetic is reported (head share → 15.33%, S1 → −11.57%); the open empirical question is only whether the two compressions *interact*. |
-| 4 | **S1 novelty check** against SVD-softmax / adaptive softmax / MIPS-softmax | **not done**, and it gates any claim that the method is new. §3e already isolates which component would be the contribution. |
+| 4 | **S1 novelty check** against SVD-softmax / adaptive softmax / MIPS-softmax | **not done**, and it gates any claim that the method is new. §3f already isolates which component would be the contribution. |
 | 5 | **Input-embedding reuse** on an untied model (§1e) | **not run.** `scripts/lm_head_embed_reuse.py` is written; it is the last untested storage idea and cannot be tested on the tied 0.6B. |
 | 6 | **F1** — reproduce/refute CSV-Decode's 18.4% \|S\|/V | **not run**; needs an external clone. Part 3 makes this less interesting than it was: S1 shows an *uncertified* screen at ~25% of reads is free, so whether a *certified* one reaches 18.4% is now a question about certificates, not about the axis. |
 | 7 | **Learned rotation** for the S1 screen | **not run.** `ceig` is off-the-shelf; the basis that maximizes per-token coefficient concentration is an orthogonal-Procrustes problem, and §3b's energy table (95.21% at `r=256`) bounds what it could buy. Low priority — KL is already 0.0003. |
