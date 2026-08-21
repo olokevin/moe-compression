@@ -30,6 +30,12 @@ Every metric is indistinguishable from dense while touching a quarter of the hea
 **+18.4 pt of HellaSwag / +4.8 pt of ARC-C above the best previously measured method at
 the same budget.** It needs no training and no quantization.
 
+24.48% is not the limit. Sweeping the budget down ([§3e](#3e-how-low-can-the-read-budget-go))
+puts the free point at **~9% of reads on both models** (30B −0.17 pt of ARC-C, 0.6B exactly
+dense), with a knee at ~7% and a collapse below ~5%. The transferable rule is stated in KL,
+not accuracy: **~8% of reads keeps the head distributionally better than a 4-bit one on both
+models** — a 12× cut.
+
 **What was wrong before.** [Part 1](#part-1--reducing-the-stored-parameter-count) closed
 sparse reads on the strength of B1-a (perplexity ∞, HellaSwag at chance) and concluded
 *"the parameter count is irreducible; only precision is compressible."* That reading
@@ -782,9 +788,25 @@ nats it is negligible, which is why the task columns come out at +0.00.
 `scripts/lm_head_read_ladder.py` prints each variant's true budget; the ladder shrinks
 **both** knobs because each has a floor — the candidate set alone costs `N/V` (5.39% at
 `N=8192`) and the rotation costs `D/V` (1.35% on the 30B). Below ~7% of reads, `N` has to
-come down too.
+come down too. Both ladders are ARC-C + KL; C4 and HellaSwag were only run at the two
+headline budgets.
 
-**Qwen3-0.6B, ARC-C (dense 34.47 ± 1.39):**
+**Qwen3-30B-A3B, ARC-C (dense 58.87 ± 1.44, chance 25.00):**
+
+| `r0` | `N` | reads | Δactive | ARC-C | Δ | KL | argmax-in-cand |
+|---|---|---|---|---|---|---|---|
+| 384 | 8192 | 24.48% | −7.01% | **58.87** | **+0.00** | .0003 | 100.000% |
+| 128 | 8192 | 12.65% | −8.11% | 58.79 | −0.09 | .0013 | 100.000% |
+| **64** | **8192** | **9.70%** | **−8.38%** | **58.70** | **−0.17** | .0041 | 99.996% |
+| **128** | **2048** | **8.86%** | **−8.46%** | **58.70** | **−0.17** | .0118 | 99.998% |
+| 64 | 4096 | 7.08% | −8.62% | 57.94 | −0.94 | .0164 | 99.947% |
+| 32 | 4096 | 5.56% | −8.76% | **54.18** | **−4.69** | .1267 | 99.452% |
+| 32 | 2048 | 4.24% | −8.89% | **49.57** | **−9.30** | .2670 | 98.215% |
+| 16 | 2048 | 3.47% | −8.96% | **44.45** | **−14.42** | .7270 | 95.237% |
+| 16 | 1024 | 2.80% | −9.02% | **39.08** | **−19.80** | 1.1988 | 89.723% |
+| 8 | 1024 | 2.41% | −9.06% | **34.47** | **−24.40** | 1.9518 | 85.433% |
+
+**Qwen3-0.6B, ARC-C (dense 34.47 ± 1.39, chance 25.00):**
 
 | `r0` | `N` | reads | ARC-C | Δ | KL | argmax-in-cand |
 |---|---|---|---|---|---|---|
@@ -799,43 +821,85 @@ come down too.
 | 8 | 1024 | 2.12% | **28.50** | **−5.97** | 1.2825 | 90.916% |
 | 4 | 1024 | 1.74% | **25.77** | **−8.70** | 2.0359 | 85.586% |
 
-Three regimes:
+Both models show the same three regimes:
 
-1. **Free down to ~9% of reads** — 34.47, exactly dense, and every point above 3.5% is
-   inside dense's ±1 stderr band.
-2. **Graceful between ~9% and ~2.8%** — the curve bends but never breaks; −1.54 pt at
-   2.79%.
-3. **Cliff below ~2.8%** — 2.12% costs −5.97 and 1.74% is at chance (25.00). This is where
-   the screen stops finding the right candidates: argmax-in-candidate falls through ~91%.
+1. **Free down to ~9% of reads.** 30B: −0.17 at 9.70% *and* at 8.86%. 0.6B: exactly dense at
+   9.02%. Both inside ±1 stderr. That is a **2.6× deeper cut than the headline 24.48%
+   operating point**, for nothing measurable.
+2. **A knee at ~7%.** Both step to about −1 pt (30B −0.94 at 7.08%, 0.6B −0.68 at 6.41%).
+3. **Then it breaks.** 30B −4.69 at 5.56% and −24.40 at 2.41%; 0.6B −0.94 at 4.89% and −8.70
+   at 1.74%. The mechanism is in the last column: argmax-in-candidate falls from ~99.9% to
+   ~85%, i.e. the screen stops surfacing the right rows and the refine stage never sees them.
 
-**Two comparisons worth stating.** At **2.79%** of reads S1 scores 32.94 — the same as row
-pruning, which stores 21.57% and reads 8× more. And at essentially B1-a's own read budget
-(2.79% vs its 2.70%), S1 scores **32.94 against B1-a's 26.79**: +6.15 pt for the same
-number of reads, which is §3a's diagnosis measured at the extreme.
+### ⚠️ A prediction this ladder falsified
 
-**The task score alone would mislead you, and the KL panel is why the figure has two
-rows.** ARC-C stays inside its own noise band down to 3.5% while KL rises 20×, so a
-task-only reading would call a 4%-read head free. The right landmark: **S1's KL crosses the
-4-bit head's 0.0415 at ~8% of reads** — below that, the distribution is measurably worse
-than a 4-bit head even though ARC-C has not noticed.
+Before the 30B ladder ran, this section predicted the 30B would degrade **more slowly** than
+the 0.6B, reasoning from its lower KL at matched budget (.0013 at 12.65% against the 0.6B's
+.0072). The KL comparison is right; the conclusion drawn from it was wrong. In absolute
+accuracy the 30B breaks **harder and earlier**: −4.69 pt at 5.56% where the 0.6B costs −0.94
+at 4.89%, and −24.40 at 2.41% against −8.70 at 1.74%.
 
-An ablation makes the point unmissable. `s1_r12_n8k_mag` — the crudest possible screen,
-picking the top-`r0` entries of `h` by `|hᵢ|` with no rotation and no column norm — has
-**KL 0.6194, 86× worse** than the real screen at the identical 11.98% budget, and scores
-ARC-C **35.15 (+0.68)**, nominally *above* dense. Select on KL or perplexity; let the tasks
-certify "not catastrophic". This is the same lesson as `B1-s T=16384/tail-2b` in
-[§"What the benchmarks can and cannot see"](#what-the-benchmarks-can-and-cannot-see),
-now on a third axis.
+The cause is headroom, not fragility. ARC-C at 58.87 has **33.87 pt above chance to lose**;
+the 0.6B's 34.47 has only **9.47**. Normalized, the two lose a comparable *fraction* of
+headroom at comparable KL — 4.69/33.87 = 13.8% for the 30B at KL .127 versus 0.94/9.47 =
+9.9% for the 0.6B at KL .209. The same distributional damage simply costs a stronger model
+more points. **Do not extrapolate a low-read operating point from a small model's task
+score.** Extrapolate the KL, then convert with the target model's headroom.
 
-**Qwen3-30B-A3B:** the prediction of a later cliff holds. At the **12.65%** budget the same
-crude `|hᵢ|`-only screen costs **KL 0.0275** — 21× the real screen's 0.0013 and **×1.057 C4**,
-measurably worse but far milder than the 0.6B's 86×, exactly because the larger head's base-S1
-KL is lower there (0.0013 vs 0.0072). Tasks barely move (HellaSwag −0.64, ARC-C −0.60) since
-the graded tail keeps argmax-in-candidate at 100.000%; the loss lives in perplexity. See the
-[primary-target](#qwen3-30b-a3b--the-primary-target) and
-[diagnostics](#qwen3-30b-a3b--diagnostics-2048-calibration-states) tables (variant
-`s1_r12_n8k_mag`, `run_results/lm_head_s1_30b_mag.json`). The lower-read ladder (9.70% → 2.41%)
-is a separate run.
+### The operating point, in the currency that transfers
+
+The task-score plateau is wider than the distribution warrants, so read the safe budget off
+KL. Taking a 4-bit head's KL (.0415) as a reference both models cross:
+
+| | KL ≤ .0415 down to | ARC-C cost there |
+|---|---|---|
+| Qwen3-30B-A3B | **~6.5% of reads** | ≈ −0.9 pt |
+| Qwen3-0.6B | **~7.7% of reads** | ≈ −0.7 pt |
+
+**~8% of reads is the model-independent recommendation** — a 12× cut, still distributionally
+better than a 4-bit head on both models. Below that the two diverge sharply in task terms
+even though their KL curves stay close, which is exactly the trap the previous section
+describes.
+
+**Two comparisons worth stating.** At **2.79%** of reads the 0.6B scores 32.94 — the same as
+row pruning, which stores 21.57% and reads 8× more. And at essentially B1-a's own read budget
+(2.79% vs its 2.70%), S1 scores **32.94 against B1-a's 26.79**: +6.15 pt for the same number
+of reads, which is §3a's diagnosis measured at the extreme.
+
+### Why the figure has a KL row
+
+On the 0.6B, ARC-C stays inside its own ±1 stderr band down to 3.5% while KL rises 20×, so a
+task-only figure would call a 4%-read head free. The `s1_r12_n8k_mag` ablation — the crudest
+possible screen, top-`r0` entries of `h` by `|hᵢ|` with no rotation and no column norm (gate
+0g promoted to a sweep variant) — makes this concrete, and the two models disagree
+instructively at the identical budget:
+
+| | reads | KL | vs real screen | C4 | HellaSwag | ARC-C |
+|---|---|---|---|---|---|---|
+| 0.6B `s1_r12_n8k` | 11.98% | .0072 | — | — | — | 34.22 (−0.26) |
+| 0.6B `s1_r12_n8k_mag` | 11.98% | **.6194** | 86× worse | — | — | **35.15 (+0.68)** |
+| 30B `s1_r12_n8k` | 12.65% | .0013 | — | 25.430 (×1.003) | 78.52 (−0.05) | 58.79 (−0.09) |
+| 30B `s1_r12_n8k_mag` | 12.65% | **.0275** | 21× worse | **26.803 (×1.057)** | **77.93 (−0.64)** | **58.28 (−0.59)** |
+
+On the 0.6B the crude screen scores *above* dense while being 86× worse distributionally —
+pure noise, and a reader trusting the task score would conclude the rotation and the column
+norm are unnecessary. On the 30B, which has the headroom to resolve it, the same ablation
+costs a real **−0.64 HellaSwag and +5.7% perplexity**. **Select on KL or perplexity; let the
+tasks certify "not catastrophic."** Same lesson as `B1-s T=16384/tail-2b` in
+[§"What the benchmarks can and cannot see"](#what-the-benchmarks-can-and-cannot-see), now on
+a third axis — and here it nearly produced a wrong conclusion about S1's own components.
+
+Two loose ends, recorded rather than smoothed over:
+
+- **The crude screen's KL is 22× apart across the models** (.6194 on the 0.6B, .0275 on the
+  30B) at the same `D/16` screen width. The standard basis is evidently far better aligned
+  with what the 30B's head needs. Not investigated.
+- **Two independent runs of `s1_r12_n8k_mag` on the 30B give ARC-C 58.28 and 58.19** — one
+  item out of 1172. The method is deterministic given `C`; the difference is bf16 reduction
+  order under a different `device_map` shard layout. Treat ±0.1 pt as the reproducibility
+  floor for 30B task numbers and do not read a ranking into gaps that small. The table above
+  quotes the dedicated run (`results_eval/lm_head_s1_30b_mag.json`), which carries all three
+  metrics; the ladder run's 58.19 is in `lm_head_s1_30b_lowread_arc.json`.
 
 ## 3f. Ablations that attribute the win
 
@@ -1042,6 +1106,8 @@ Recorded because most of them produced plausible-looking wrong numbers.
 | 4 | **S1 novelty check** against SVD-softmax / adaptive softmax / MIPS-softmax | **not done**, and it gates any claim that the method is new. §3f already isolates which component would be the contribution. |
 | 5 | **Input-embedding reuse** on an untied model (§1e) | **not run.** `scripts/lm_head_embed_reuse.py` is written; it is the last untested storage idea and cannot be tested on the tied 0.6B. |
 | 6 | **F1** — reproduce/refute CSV-Decode's 18.4% \|S\|/V | **not run**; needs an external clone. Part 3 makes this less interesting than it was: S1 shows an *uncertified* screen at ~25% of reads is free, so whether a *certified* one reaches 18.4% is now a question about certificates, not about the axis. |
-| 7 | **Learned rotation** for the S1 screen | **not run.** `ceig` is off-the-shelf; the basis that maximizes per-token coefficient concentration is an orthogonal-Procrustes problem, and §3b's energy table (95.21% at `r=256`) bounds what it could buy. Low priority — KL is already 0.0003. |
+| 7 | **Learned rotation** for the S1 screen | **not run.** `ceig` is off-the-shelf; the basis that maximizes per-token coefficient concentration is an orthogonal-Procrustes problem, and §3b's energy table (95.21% at `r=256`) bounds what it could buy. Low priority at 24% of reads (KL .0003) — but §3e makes it interesting *below* 7%, where the screen is what fails. |
+| 8 | **C4 / HellaSwag on the low-read ladder** | **not run.** §3e's ladders are ARC-C + KL only. Given §3e's own finding that task scores mislead in the plateau, perplexity across the ladder would be the more informative column, and cheaper than HellaSwag. |
+| 9 | **Why the crude screen's KL differs 22× across models** (§3e) | **not investigated.** `.6194` on the 0.6B vs `.0275` on the 30B at the same `D/16` width, i.e. the standard basis suits the 30B's head far better. Would predict how much the `raw` (zero-calibration) variant can be trusted on an unseen model. |
 
 Nothing outstanding changes a conclusion above.
