@@ -183,7 +183,7 @@ def main(args, model, tokenizer):
 
         if criterion in (
             "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-            "sparse_probe", "weight_sparse",
+            "sparse_probe", "weight_sparse", "input_only",
         ):
             pubsub_artifact = None
             scorer_kwargs = None
@@ -258,6 +258,31 @@ def main(args, model, tokenizer):
                     f"rho_channel={1.0 - prune_ratio:.4f}, "
                     f"bits={scorer_kwargs['bits']}, group={scorer_kwargs['group']}, "
                     f"use_gate={scorer_kwargs['use_gate']}, lam={scorer_kwargs['lam']}, "
+                    f"input_alloc={scorer_kwargs['input_alloc']})"
+                )
+            elif criterion == "input_only":
+                # ONE-PASS input sparsity: gate/up read only the token's top
+                # rho_input coordinates by |x| and that sparse intermediate IS the
+                # compute -- no proxy, no exact re-read, nothing billed twice. down
+                # is then gathered to the pooled top-B channels.
+                #
+                #   used = (2*rho_input + rho_channel)/3
+                #
+                # Note the cost asymmetry INVERTS versus sparse_probe: here
+                # rho_channel is the cheap axis (1/3 per unit) and rho_input the
+                # expensive one (2/3). rho_input=1 reduces to oracle_mag_noW
+                # exactly, in both output and cost. See input_only.py.
+                sc = dynamic_alloc_cfg.get("input_only", {}) or {}
+                if sc.get("rho_channel") is not None:
+                    prune_ratio = 1.0 - float(sc["rho_channel"])
+                scorer_kwargs = {
+                    "rho_input": float(sc.get("rho_input", 0.25)),
+                    "input_alloc": str(sc.get("input_alloc", "uniform")),
+                }
+                _print(
+                    f"\n[Step 3] Dynamic allocation (criterion=input_only, "
+                    f"rho_input={scorer_kwargs['rho_input']}, "
+                    f"rho_channel={1.0 - prune_ratio:.4f}, "
                     f"input_alloc={scorer_kwargs['input_alloc']})"
                 )
             elif criterion == "weight_sparse":

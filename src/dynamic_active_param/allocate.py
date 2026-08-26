@@ -46,9 +46,16 @@ _VALID_CRITERIA = ("router_prob", "contribution", "uniform", "coverage_alloc", "
 #                     the top-|x| coordinates only — full rank, low precision,
 #                     which is the axis the low-rank family got wrong. Decision
 #                     also precedes all three matmuls. See sparse_probe.py.
+#   input_only      : no scorer at all. gate/up run on the token's top-|x|
+#                     coordinates and that sparse result *is* the intermediate, so
+#                     the reads that decide are the reads that compute (one pass,
+#                     nothing billed twice). Ranked by g * |inter| like
+#                     oracle_mag_noW, which it reduces to at rho_input=1. The only
+#                     criterion that changes the FFN's values, not just its mask.
+#                     See input_only.py.
 _CROSS_EXPERT_CRITERIA = (
     "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-    "sparse_probe", "weight_sparse", "channel_router",
+    "sparse_probe", "weight_sparse", "channel_router", "input_only",
 )
 
 

@@ -61,25 +61,34 @@ row below is on one scale**.
 
 ## Leaderboard
 
-Qwen3-30B-A3B, HellaSwag 0-shot acc_norm (dense = 78.56) and full MMLU 5-shot
-(dense = 80.91). stderr ≈0.42pt / ≈0.34pt. Masking simulation, no fine-tuning.
+**Qwen3-30B-A3B**, **HellaSwag 0-shot acc_norm (dense = 78.56) and full MMLU 5-shot
+(dense = 80.91)**. stderr ≈0.42pt / ≈0.34pt. Masking simulation, no fine-tuning.
 All `input_sparse` rows read the served weights: **zero extra storage**.
 
 | #  | method                                                      | `ρ_input` | `ρ_channel` | used-param cut    | HellaSwag       | MMLU 5-shot     | status                                  |
 | -- | ----------------------------------------------------------- | ------------ | -------------- | ----------------- | --------------- | --------------- | --------------------------------------- |
-| 0a | **`weight_sparse` `tau`** (unstructured, uniform) | 0.1125 †    | 0.125          | **−80.0%** | **74.87** | *running*     | measured (ladder 74.7 ✓)               |
-| 0b | `weight_sparse` rectangle `0.25x0.45` (1 level)         | 0.1125 †    | 0.125          | **−80.0%** | **74.47** | *running*     | measured (ladder 74.1 ✓)               |
-| 0c | `weight_sparse` `tau` + `router`                      | 0.1125 †    | 0.125          | **−80.0%** | **74.41** | *running*     | measured (ladder 75.0, −0.6)           |
-| 0d | `input_sparse` + `router` at the same reads (control)   | 0.1125       | 0.125          | **−80.0%** | **71.41** | *running*     | measured (ladder 73.4,**−1.95**) |
+| 0a | **`weight_sparse` `tau`** (unstructured, uniform) | 0.1125 †    | 0.125          | **−80.0%** | **74.87** | *rerunning*   | HS measured (ladder 74.7 ✓); MMLU OOM'd 08-14, relaunched 08-19 |
+| 0b | `weight_sparse` rectangle `0.25x0.45` (1 level)         | 0.1125 †    | 0.125          | **−80.0%** | **74.47** | **77.62** | measured (ladder 74.1 ✓)               |
+| 0c | `weight_sparse` `tau` + `router`                      | 0.1125 †    | 0.125          | **−80.0%** | **74.41** | **77.82** | measured (ladder 75.0, −0.6)           |
+| 0d | `input_sparse` + `router` at the same reads (control)   | 0.1125       | 0.125          | **−80.0%** | **71.41** | **75.82** | measured (ladder 73.4,**−1.95**) |
+| 0e | **`input_only` + `router`** (one-pass, symmetric)  | 0.300 ‡     | 0.300 ‡        | **−70.0%** | **73.18** | **77.60** | measured (2-pass −2.21 better)          |
+| 0f | **`input_only` + `router`** (one-pass, symmetric)  | 0.250 ‡     | 0.250 ‡        | **−75.0%** | **71.35** | **76.06** | measured (2-pass −2.73 better)          |
+| 0g | **`input_only` + `router`** (one-pass, symmetric)  | 0.200 ‡     | 0.200 ‡        | **−80.0%** | **67.38** | **73.97** | measured (2-pass −5.17 better)          |
+| 0h | `input_only` + `uniform` (one-pass, symmetric)           | 0.300 ‡     | 0.300 ‡        | **−70.0%** | **64.33** | **70.24** | measured (`router` control, −8.85)    |
+| 0i | `input_only` + `uniform` (one-pass, symmetric)           | 0.250 ‡     | 0.250 ‡        | **−75.0%** | **56.95** | **62.82** | measured (`router` control, −14.40)   |
+| 0j | `input_only` + `uniform` (one-pass, symmetric)           | 0.200 ‡     | 0.200 ‡        | **−80.0%** | **45.58** | **49.52** | measured (`router` control, −21.80)   |
 | 1  | `oracle_mag_noW` (full gate+up, single pass)              | —           | 0.125          | −29.2%           | **77.11** | **79.44** | measured                                |
 | 2  | `input_sparse`                                            | 1.00         | 0.125          | −20.8%           | **76.95** | —              | measured ¶                             |
 | 3  | `input_sparse`                                            | 0.50         | 0.125          | −54.2%           | ~76.6           | —              | predicted (ladder)                      |
-| 4  | `input_sparse`                                            | 0.25         | 0.20           | −63.3%           | **76.72** | *running*     | measured                                |
+| 4  | `input_sparse`                                            | 0.25         | 0.20           | −63.3%           | **76.72** | **79.10** | measured                                |
 | 5  | `input_sparse`                                            | 0.25         | 0.15           | **−68.3%** | **76.47** | **78.63** | measured                                |
 | 6  | `input_sparse`                                            | 0.25         | 0.10           | **−73.3%** | **74.06** | **77.20** | measured (ladder 74.2)                  |
 | 7  | **`input_sparse` + `router` alloc**               | 0.25         | 0.10           | **−73.3%** | **74.64** | **77.67** | measured (ladder 74.9)                  |
-| 7a | **`input_sparse` + `router`, optimal split**      | 0.1875       | 0.125          | **−75.0%** | **74.08** | *running*     | measured (ladder 74.5)                  |
-| 7b | `input_sparse` + `router`, mis-allocated split          | 0.25         | 0.0833         | −75.0%           | **73.80** | *running*     | measured (ladder 74.0)                  |
+| 7a | **`input_sparse` + `router`, solved split**       | 0.1875       | 0.14170        | **−73.3%** | **74.63** | **77.94** | measured (ties row 7)                   |
+| 7b | **`input_sparse` + `router`, solved split**       | 0.1875       | 0.125          | **−75.0%** | **74.08** | **77.77** | measured                                |
+| 7c | `input_sparse` + `router`, mis-allocated split          | 0.25         | 0.0833         | −75.0%           | **73.80** | **77.33** | measured (iso-cost control)             |
+| 7d | **`input_sparse` + `router`, solved split**       | 0.1875       | 0.10000        | **−77.5%** | **73.33** | **76.81** | measured                                |
+| 7e | **`input_sparse` + `router`, solved split**       | 0.1575       | 0.09500        | **−80.0%** | **72.55** | **76.11** | measured                                |
 | 8  | `input_sparse` + per-layer schedule (unweighted)          | mixed        | mixed          | −73.3%           | **73.90** | **77.85** | measured (ladder 74.9 ✗)               |
 | 8b | `input_sparse` + per-layer schedule (slope-weighted)      | mixed        | mixed          | −73.0%           | **70.77** | —              | measured (**fails**)              |
 | 9  | `oracle_up` (full up, cut gate)                           | —           | 0.125          | −58.3%           | **71.30** | **76.43** | measured                                |
@@ -95,6 +104,18 @@ columns, so all four read exactly what `input_sparse` at `ρ_input=0.1125` reads
 pay 4–17% of extra *storage* for positional metadata, which rows 1–12 do not.
 Realized read density was verified in-run over the eval stream: 0.1118 and 0.1123 of a
 branch against the 0.1125 target, i.e. `used` 0.1995 / 0.1999.
+
+‡ Rows 0e–0j are the **one-pass** method
+[`input_only`](#input_only-stop-scoring-just-compute-on-the-sparse-input), whose cost
+is `(2ρ_input + ρ_channel)/3` rather than `ρ_channel + 2ρ_input/3` — the sparse read
+*is* the compute, so nothing is billed twice and the two sparsities are not
+comparable row-for-row with rows 1–12. At the symmetric split `ρ_input = ρ_channel`
+the used-parameter cut equals `1 −` that sparsity exactly. **The method is dominated:
+at identical `used` the two-pass rows beat it by 2.21 / 2.73 / 5.17pt HellaSwag, and
+the gap widens with depth** — so the discarded exact pass is worth paying for. Rows
+0h–0j are the `uniform` controls, and they carry the section's real finding:
+`router` allocation is worth **+8.85 / +14.40 / +21.80pt** here, the largest single
+effect in this document.
 
 ¶ Row 2 was run with a 4-bit probe on dense `x`. At `p=1` a 4-bit probe and the
 served-weight probe select **identically** on a 4-bit served model (RTN is
@@ -118,19 +139,37 @@ schedule that redistributes budget *across layers*; see "The schedule failure" b
   **+3.46pt** (74.87 vs the 71.41 control, rows 0a vs 0d — 5.5σ). The price is 4–17%
   of extra *storage* for positional metadata; see
   [Unstructured sparsity](#unstructured-sparsity-buy-entries-not-coordinates).
-- **The best zero-extra-storage result remains −73.3% at 74.64 HellaSwag / 77.67
-  MMLU** (row 7). Against the only prior selectors reaching comparable
-  depth: **+30.5pt over Level-1 `pivchol`** (−87.5%, 44.15) and **+3.34pt over
-  `oracle_up`** while cutting **15.0 more points** of the FFN. Costs 3.92pt of
-  HellaSwag and 3.24pt of MMLU against dense.
+- **The zero-extra-storage frontier is now a full curve on both metrics** (rows 7a–7e
+  plus 6/7), six budgets measured end-to-end:
+  **−63.3% → 76.61 / 79.45**, **−73.3% → 74.63 / 77.94**, **−77.5% → 73.33 / 76.81**,
+  **−80.0% → 72.55 / 76.11** (dense 78.56 / 80.91). It reaches **−80.0% while staying
+  within 6.01pt HellaSwag / 4.80pt MMLU of dense**, descending smoothly at ≈0.24pt
+  HellaSwag per pp with **no cliff**. Against the prior selectors at comparable depth:
+  **+32.4pt over Level-1 `pivchol`** (which is at 44.15 by −87.5%) and **+3.33pt over
+  `oracle_up`** at −73.3% while cutting 15.0 more points of the FFN. Figures:
+  `docs/presentation/figs/fig_probe_curve_{hellaswag,mmlu}.pdf`.
+- **MMLU degrades more gracefully at every budget, and the gap widens with depth** —
+  0.49pt less loss than HellaSwag at −63.3%, 1.21pt less at −80.0%. Mechanism: the
+  fitted rel_err→accuracy slope is **−20.3 for MMLU vs −24.5 for HellaSwag**, so the
+  same block-output error buys less MMLU damage.
 - **It beats the low-rank family at matched cost by ~9–11pt.** Rows 10–11 sit at
   −71.2% / −73.1% on the *same* accounting and score 65.97 / 63.94; row 7 is
   −73.3% at 74.64. That is the cleanest iso-cost comparison in this table, since
   `lowrank_scorer` already used the scoring-plus-compute frame.
-- **`router` input allocation is confirmed: +0.58pt HellaSwag, +0.47pt MMLU**
-  (74.06→74.64, 77.20→77.67) at *identical* cost and reads/token. Predicted +0.66
-  from the offline screen. Free — one extra bisection over a sort the layer already
-  computes.
+- **`router` input allocation is confirmed but budget-dependent: +0.58pt HellaSwag,
+  +0.47pt MMLU at `ρ_channel=0.10`** (74.06→74.64, 77.20→77.67) at *identical* cost and
+  reads/token, predicted +0.66 — but only **−0.11 / +0.35** by `ρ_channel=0.20`, where
+  the offline screen predicted a near-identical +0.53. Free either way (one extra
+  bisection over a sort the layer already computes), and worth the most exactly where
+  this method operates. And it is worth **vastly** more when the sparse reads carry the *values*
+  rather than a ranking: **+8.9 to +21.8pt** for one-pass
+  [`input_only`](#input_only-stop-scoring-just-compute-on-the-sparse-input) (rows
+  0e–0j), the largest single effect in this document.
+- **The two-pass structure is worth paying for, now measured.** Reusing the sparse
+  read as the computation instead of re-reading exactly (`input_only`, rows 0e–0g)
+  loses **2.21 / 2.73 / 5.17pt** HellaSwag at identical used-parameters. So the third
+  of the budget `input_sparse` spends on a decision it discards buys back more than it
+  costs — the first direct test of that design choice.
 - **The two sparsities are not interchangeable.** Row 2 (`ρ_input=1`) spends two
   thirds of its budget on *scoring* and only reaches −20.8%; row 5
   (`ρ_input=0.25, ρ_channel=0.15`) spends a sixth on scoring, reaches −68.3%, and
@@ -212,7 +251,7 @@ masking sim, no finetune; dense = 78.56 / 80.91):
 
 | `ρ_channel`    | used-param cut    | HellaSwag acc_norm | Δ vs dense      | MMLU 5-shot     | Δ vs dense      |
 | ----------------- | ----------------- | ------------------ | ---------------- | --------------- | ---------------- |
-| 0.200             | −63.3%           | **76.72**    | −1.84           | *running*     | —               |
+| 0.200             | −63.3%           | **76.72**    | −1.84           | **79.10** | −1.81           |
 | 0.150             | −68.3%           | **76.47**    | −2.09           | **78.63** | −2.28           |
 | 0.100             | **−73.3%** | **74.06**    | −4.50           | **77.20** | −3.71           |
 | 0.100 +`router` | **−73.3%** | **74.64**    | **−3.92** | **77.67** | **−3.24** |
@@ -263,14 +302,57 @@ sim, no finetune; two arms, both verified in-run at `USED PARAMS=0.2500`):
 | **`opt`** | **0.1875** | **0.125** | 50 / 50         | 768   | 384   | **0.4613** | **74.08** | 74.53     |
 | `mis`           | 0.25             | 0.0833          | 67 / 33         | 512   | 512   | 0.4833           | **73.80** | 73.95     |
 
-**Verdict: the direction is right, the magnitude is not resolvable.** `opt` beats
-`mis` by **+0.28pt** against a pre-registered **+0.58pt**. The stderr of the
-*difference* is ≈0.62pt, so **+0.28 is inside one sigma of both the prediction and
-of zero** — this single pair confirms the sign and rules out a large penalty for
-mis-allocation, but it does **not** establish the principle at eval resolution. The
-honest summary is "the solved split is not worse, and is probably slightly better."
-Both arms individually landed *below* their absolute predictions (−0.45 / −0.15pt),
-consistent with the ladder's stated ±0.26pt only for `mis`.
+**Verdict after three iso-cost tests: solving the split is a wash.** `opt` beats
+`mis` here by **+0.28pt HS / +0.44pt MMLU** against a pre-registered **+0.58pt**,
+with a ≈0.62pt stderr on the difference — inside one sigma of both the prediction
+and of zero. The full sweep then added a *cleaner* test at −73.3%, where the
+hand-picked and solved splits can be compared at **identical** `router` allocation:
+
+| budget  | hand-picked /`mis`           | solved                           | Δ HellaSwag     | Δ MMLU         | ladder predicted |
+| ------- | ------------------------------ | -------------------------------- | ---------------- | --------------- | ---------------- |
+| −73.3% | 0.25 / 0.10 → 74.64 / 77.67   | 0.1875 / 0.1417 → 74.63 / 77.94 | **−0.01** | **+0.27** | +0.34            |
+| −75.0% | 0.25 / 0.0833 → 73.80 / 77.33 | 0.1875 / 0.125 → 74.08 / 77.77  | **+0.28**  | **+0.44** | +0.58            |
+
+Four iso-cost measurements: **−0.01 / +0.27 / +0.28 / +0.44**, mean ≈ **+0.25pt**,
+every one at or inside its ≈0.5–0.6pt stderr and every one at or below its prediction.
+Two readings that survive the full sweep:
+
+- **On HellaSwag it is a wash.** The −73.3% pair — the cleanest test, since only the
+  split differs — is a **dead tie** (−0.01), and −75.0% is +0.28.
+- **On MMLU it is consistently, weakly positive** (+0.27 and +0.44, both budgets, same
+  sign). Suggestive of a real small effect rather than noise, but neither point clears
+  its own stderr, so it stays "probably slightly helps".
+
+**But at −80.0% the split matters a lot.** Row 0d is an unintended fifth iso-cost test:
+`input_sparse` + `router` at `ρ_input=0.1125, ρ_channel=0.125` (37.5% of the budget on
+scoring), against row 7e's solved `0.1575 / 0.095` (52.5%, the optimum) at the *same*
+`used = 0.2000`:
+
+| −80.0%, both`input_sparse`+`router` | `ρ_input`     | `ρ_channel`  | scoring share   | HellaSwag       |
+| ---------------------------------------- | ---------------- | --------------- | --------------- | --------------- |
+| row 0d (under-scoring)                   | 0.1125           | 0.125           | 37.5%           | **71.41** |
+| **row 7e (solved)**                | **0.1575** | **0.095** | **52.5%** | **72.55** |
+
+**+1.14pt for the solved split** — well outside stderr, and ~4× the effect at −75.0%.
+
+So the correct statement is **depth-dependent**: the split is a flat direction at
+moderate budgets (−0.01 to +0.44pt over three tests at −73.3%/−75.0%) and a **real
+lever once the budget gets tight** (+1.14pt at −80.0%). The intuition is that at
+`used=0.20` there is no slack anywhere, so mis-spending 15pp of the budget on the wrong
+axis can no longer be absorbed. Practical rule: **hand-picking is harmless down to
+about −75%, and worth solving below that.** The seconds-long offline solve is cheap
+enough to just always run.
+
+One caveat on the ladder here: `ρ_input=0.1125` is *below* the surface's grid minimum
+(0.125), so `probe_split_solve.py` clamps rather than interpolates and its rel_err for
+row 0d is not trustworthy — indeed it predicts the wrong sign (−0.21pt vs the measured
++1.14). The **measurement** is the evidence at this budget, not the ladder.
+
+This is a **negative result for the split solve specifically**, not for the surface:
+see the sweep-wide ladder check below, where the same surface predicts the *whole*
+accuracy curve at R² = 0.997. rel_err tracks accuracy well **along** the budget axis
+and poorly **across** iso-cost splits — a narrower version of the same lesson the
+per-layer schedule taught.
 
 **What it does buy is depth.** Placed against the two −73.3% rows:
 
@@ -292,6 +374,58 @@ Two caveats. The surface was measured under `uniform` allocation, so `router`'s
 prediction, and the −0.45pt miss on `opt` is where that shows. And `ρ_input`\* is
 read off a grid whose nearest neighbours are 0.125 and 0.25, so 0.1875 is "the best
 grid point", not a solved continuum optimum.
+
+### The full best-practice sweep — six budgets
+
+All six budget points at best-practice settings (`bits=16`, `use_gate=true`,
+`input_alloc=router`, `lam=1.0`, `k_min=0`, no schedule) with the split solved per
+budget. **HellaSwag complete; MMLU in flight** (only −75.0% measured so far).
+Figures: `docs/presentation/figs/fig_probe_curve_{hellaswag,mmlu}.pdf`.
+
+| cut     | `ρ_input` | `ρ_channel` | `B` | reads | surface rel_err | HellaSwag       | Δ dense | MMLU            | Δ dense |
+| ------- | ------------ | -------------- | ----- | ----- | --------------- | --------------- | -------- | --------------- | -------- |
+| −63.3% | 0.2500       | 0.20003        | 1229  | 512   | 0.3557          | **76.61** | −1.95   | **79.45** | −1.46   |
+| −68.3% | 0.2400       | 0.15670        | 963   | 492   | 0.3984          | **75.78** | −2.78   | **78.98** | −1.93   |
+| −73.3% | 0.1875       | 0.14170        | 871   | 384   | 0.4442          | **74.63** | −3.93   | **77.94** | −2.97   |
+| −75.0% | 0.1875       | 0.12500        | 768   | 384   | 0.4613          | **74.08** | −4.48   | **77.77** | −3.14   |
+| −77.5% | 0.1875       | 0.10000        | 614   | 384   | 0.4923          | **73.33** | −5.23   | **76.81** | −4.10   |
+| −80.0% | 0.1575       | 0.09500        | 584   | 323   | 0.5246          | **72.55** | −6.01   | **76.11** | −4.80   |
+
+**Complete: 12/12 evals.** Both metrics monotonic across the whole range.
+
+**No cliff.** The curve is monotonic and gently sloped across the whole range —
+1.95pt down at −63.3%, 6.01pt at −80.0%, i.e. roughly **0.24pt per pp of extra cut**.
+For contrast, the only offline method that reaches comparable depth (Level-1
+`pivchol`) is at **44.15** by −87.5%, and activate-fewer-experts is at **26.2**. At
+−80.0% this method is still within 6pt of dense while using a fifth of the FFN
+parameters per token.
+
+**The ladder's best validation yet.** Regressing the six measured accuracies on their
+surface rel_err:
+
+| metric    | slope (pt per unit rel_err)              | R²             |
+| --------- | ---------------------------------------- | --------------- |
+| HellaSwag | **−24.5** (pre-registered −26.4) | **0.997** |
+| MMLU      | **−20.3**                         | **0.979** |
+
+So the 4-minute offline instrument predicts *two* entire 6-point accuracy sweeps,
+spanning 17pp of budget, to within ~7% of the pre-registered HellaSwag slope. The MMLU
+slope is **shallower (−20.3)**, which is the quantitative form of the "MMLU degrades
+more gracefully" observation below — one unit of block-output error buys less MMLU
+damage than HellaSwag damage. A single rel_err surface therefore serves both metrics,
+with a per-metric slope.
+
+That is also what makes the split-solve non-result above interpretable rather than
+confusing: rel_err is an excellent predictor **along the budget axis** and an
+unreliable one **between iso-cost splits**, where the true surface is flat and the
+measured differences are noise.
+
+**MMLU degrades more gracefully at every single budget**, and the gap *widens* with
+depth — MMLU gives up 0.49pt less than HellaSwag at −63.3%, rising to 1.21–1.34pt less
+from −75.0% on. At −80.0% the method is **−4.80 on MMLU versus −6.01 on HellaSwag**.
+This confirms across six budgets what the doc previously noted at one: the hypothesis
+that per-token activation matters *more* on knowledge-heavy tasks is **not supported**;
+the reverse holds, consistently and with a mechanism (the shallower rel_err slope).
 
 ---
 
@@ -339,6 +473,77 @@ Two reads worth keeping:
 - **`colnorm` is a wash on output error too** (+0.01pt), confirming the earlier
   recall-based verdict from a second, accuracy-anchored metric. Column-norm CV is
   0.022 — there is nothing to weight.
+
+### Measured end-to-end — and the offline gain does *not* hold across budgets
+
+The table above is offline. HellaSwag + full MMLU at `ρ_input=0.25`, everything else
+at best practice (`bits=16`, `use_gate=true`, `lam=1.0`, `k_min=0`), so `input_alloc`
+is the only thing that moves within a row:
+
+| `ρ_channel` | cut | `uniform` HS / MMLU | **`router`** HS / MMLU | Δ HS | Δ MMLU | offline predicted Δ |
+|---|---|---|---|---|---|---|
+| 0.10 | −73.3% | 74.06 / 77.20 | **74.64 / 77.67** | **+0.58** | **+0.47** | +0.66 |
+| 0.15 | −68.3% | 76.47 / 78.63 | *not measured* ¤ | | | +0.60 |
+| 0.20 | −63.3% | 76.72 / 79.10 | **76.61 / 79.45** | **−0.11** | **+0.35** | +0.53 |
+
+¤ The `ρ_channel=0.15` `router` arm was launched and then cancelled, so the trend rests
+on its **two endpoints only**. Whether +0.58 → −0.11 decays smoothly or has a knee
+somewhere in between is therefore open. Configs are ready if it matters:
+`configs/eval/qwen3_30b_a3b_probe_alloc_rtr_k25_r15_*.yaml`.
+
+The −63.3% pair is exact-iso: `reuse_k25_r20` (uniform) and `bp_cut633` (router) both
+run `ρ_input=0.25`, 512 reads/expert and `B=1229` — only the allocation differs.
+
+**The correction: `router`'s gain is budget-dependent, and on HellaSwag it is gone by
+−63.3%.** The offline screen predicted a nearly flat +0.53…+0.66pt across the whole
+`ρ_channel` range; measured, HellaSwag goes **+0.58 → −0.11** across the two budgets
+where both arms exist.
+MMLU stays positive at both ends (+0.47, +0.35) but also shrinks. So the honest reading
+is:
+
+- **`router` is worth ~+0.5pt where it matters (tight budgets) and nothing where it
+  doesn't.** It is still the right default — free, never measurably harmful, and the
+  regime this method targets *is* the tight end — but "+0.53…+0.66pt" should not be
+  quoted as a budget-independent constant. The doc's headline +0.58pt is specifically
+  the −73.3% number.
+- **Mechanism, and it is the same one as everywhere else in this doc:** the value of
+  reallocating reads scales with how binding the read budget is. At `ρ_channel=0.20`
+  there is enough channel budget that a slightly worse ranking costs little; at 0.10
+  every mis-ranked channel is one that had to displace a good one. The extreme of this
+  trend is [`input_only`](#input_only-stop-scoring-just-compute-on-the-sparse-input),
+  where the reads carry the *values* and the same allocation is worth **+8.9 to
+  +21.8pt**, also growing as the budget tightens.
+- **Another offline-screen miss, and the mildest so far**: the screen got the sign right
+  at the tight end and the magnitude wrong at the loose end. Note how *well* it does at
+  the budget it was anchored on — `router`'s residual at `ρ_channel=0.10` is
+  **−0.08pt HS / −0.04pt MMLU**, essentially exact. Compare its outright method
+  mis-ranking for `input_only` and its −0.46pt miss on `tau`+`router`. Pattern: the
+  ladder is trustworthy for "which of these selectors is better *at the budget I care
+  about*" and unreliable for extrapolating a delta *across* budgets — the same
+  along-vs-across distinction that made the
+  [split solve](#how-to-split-a-fixed-budget-between-the-two-sparsities) a wash.
+
+**`router2` and `colnorm` remain offline-only, by decision.** Evals were started and
+then cancelled: both are predicted to land *below* `router`, neither is a candidate for
+best practice, and ~26 GPU-hours to confirm a term nobody would ship is not worth it
+when the ladder is well-calibrated at exactly this budget (`router`'s residual here is
+−0.08pt). Their verdicts therefore rest on the offline screen alone — noted as a known
+soft spot rather than a settled result:
+
+| term | rel_err | offline-predicted HS / MMLU | status |
+|---|---|---|---|
+| `uniform` (anchor) | 0.4434 | — | **74.06 / 77.20** measured |
+| **`router`** | 0.4183 | 74.7 / 77.7 | **74.64 / 77.67** measured (resid −0.08 / −0.04) |
+| `router2` | 0.4272 | 74.5 / 77.5 | offline only — **not evaluated** |
+| `colnorm` | 0.4429 | 74.1 / 77.2 | offline only — **not evaluated** |
+
+If the question is ever revisited, `router2` is the one worth the GPU time: the offline
+screen puts it between `uniform` and `router`, but sharper `g_e` weighting is the
+mechanism Level-1 found **better** for the *channel* budget (`g²·σ`), so a surprise
+there would sharpen the "coordinate and channel budgets respond differently to `g_e`"
+claim rather than merely confirm it. The configs are generated and ready —
+`configs/eval/qwen3_30b_a3b_probe_alloc_{router2,colnorm}_k25_r10_*.yaml` from
+`scripts/gen_probe_alloc_configs.py`, runner `scripts/run_probe_alloc_study.sh`.
 
 ## Is `rel_err` really a linear predictor of accuracy?
 
@@ -537,7 +742,7 @@ prune_kwargs:
 | -------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bits`                   | **16**         | Probe aliases the served weight →**zero extra storage** (measured 0.00 MB). A separate 3-bit copy is dominated on *both* axes: +13% storage and worse rel_err. **The code default is 3, not 16** — omitting `bits` silently gives you the dominated variant.                                                                                                                             |
 | `use_gate`               | **true**       | Scores`g_e·\|SiLU(g̃ate)⊙ũp\|`, i.e. both branches. Dropping to up-only is `oracle_up`: **−3.34pt** at comparable depth. Replacing `SiLU(gate)` with `\|gate\|` → rel_err 0.647 vs 0.369. The gate is load-bearing here (the *opposite* of the low-rank family's verdict).                                                                                                               |
-| `input_alloc`            | **`router`** | Pools coordinate reads across the token's K experts by`g_e·\|x_i\|` instead of an equal set per expert. **+0.58pt HellaSwag / +0.47pt MMLU at identical cost and reads/token**, and it won all 16 layer×budget cells offline. Free — one bisection over a sort the layer already computes. Do **not** use `router2` (`g²` overshoots) or `colnorm` (a wash, column-norm CV = 0.022). |
+| `input_alloc`            | **`router`** | Pools coordinate reads across the token's K experts by`g_e·\|x_i\|` instead of an equal set per expert. **+0.58pt HellaSwag / +0.47pt MMLU at `ρ_channel=0.10`**, identical cost and reads/token; won all 16 layer×budget cells offline. **Budget-dependent — measured −0.11pt HS / +0.35pt MMLU by `ρ_channel=0.20`**, so do not treat +0.58 as a constant ([why](#measured-end-to-end--and-the-offline-gain-does-not-hold-across-budgets)). Still the right default: free, never measurably harmful, and worth the most at the tight budgets this method targets. Do **not** use `router2` (`g²` overshoots) or `colnorm` (a wash, column-norm CV = 0.022) — both **offline-only verdicts**, never evaluated end-to-end. |
 | `lam`                    | **1.0**        | No relaxed-candidate cascade: the extra exact reads buy less than spending them on`ρ_input`.                                                                                                                                                                                                                                                                                                            |
 | `k_min`                  | **0**          | No per-expert floor; the pooled top-`B` is global by design. (Note the code default is 16.)                                                                                                                                                                                                                                                                                                              |
 | `prune_ratio`            | `1 − rho_channel` | Redundant with`rho_channel` and **not** cross-checked at load — a mismatch silently changes `B`. Verify against the in-run `USED PARAMS=` line.                                                                                                                                                                                                                                               |
@@ -555,37 +760,46 @@ python scripts/probe_split_solve.py --budgets <C>
 
 Solved optima on the cached 8192-token surface:
 
-| target cut        | budget`C` | `ρ_input`\*   | `ρ_channel`\* | `B` | reads | HellaSwag measured*at the solved point*     |
-| ----------------- | ----------- | ---------------- | ---------------- | ----- | ----- | --------------------------------------------- |
-| −63.3%           | 0.3667      | 0.2500           | 0.2000           | 1229  | 512   | 76.72 (this*is* the solved point)           |
-| −68.3%           | 0.3167      | 0.2400           | 0.1567           | 963   | 492   | — (76.47 measured at 0.25/0.15, off-optimum) |
-| −73.3%           | 0.2667      | 0.1875           | 0.1417           | 871   | 384   | — (74.64 measured at 0.25/0.10, off-optimum) |
-| **−75.0%** | 0.2500      | **0.1875** | **0.1250** | 768   | 384   | **74.08**                               |
-| −80.0%           | 0.2000      | 0.1575           | 0.0950           | 584   | 323   | not measured                                  |
+| target cut        | budget`C` | `ρ_input`\*   | `ρ_channel`\* | `B` | reads | HellaSwag       | MMLU            |
+| ----------------- | ----------- | ---------------- | ---------------- | ----- | ----- | --------------- | --------------- |
+| −63.3%           | 0.3667      | 0.2500           | 0.2000           | 1229  | 512   | **76.61** | **79.45** |
+| −68.3%           | 0.3167      | 0.2400           | 0.1567           | 963   | 492   | **75.78** | **78.98** |
+| −73.3%           | 0.2667      | 0.1875           | 0.1417           | 871   | 384   | **74.63** | **77.94** |
+| **−75.0%** | 0.2500      | **0.1875** | **0.1250** | 768   | 384   | **74.08** | **77.77** |
+| −77.5%           | 0.2250      | 0.1875           | 0.1000           | 614   | 384   | **73.33** | **76.81** |
+| −80.0%           | 0.2000      | 0.1575           | 0.0950           | 584   | 323   | **72.55** | **76.11** |
 
-Only two rows have been evaluated *at their own optimum* (−63.3% and −75.0%); the
-−68.3% and −73.3% accuracies in the leaderboard come from the hand-picked
-`ρ_input=0.25`, which the solve says is off-optimum at those budgets. So the −73.3%
-headline of 74.64 is **not** the best this method can do at that budget — the solved
-`0.1875/0.1417` there is untested and, on the surface, has lower rel_err (0.4445 vs
-0.4572).
+**All six are measured at their own solved optimum, on both metrics** (12/12 evals).
+Reproduce: `scripts/run_probe_curve_sweep.sh` → `scripts/probe_curve_collect.sh` →
+`scripts/probe_curve_plot.py`.
 
 **`ρ_input`\* = 0.1875 at every budget ≤ −73.3%** — a roughly 50/50 scoring/compute
-split. Two honest caveats: the split's measured effect is **+0.28pt against a
-predicted +0.58 with a 0.62pt stderr on the difference**, so solving it is "does not
-hurt, probably helps a little" rather than an established win; and 0.1875 is the best
+split. How much *solving* it is worth is **depth-dependent**, from five iso-cost tests:
+
+| budget  | Δ for the solved split                    | verdict         |
+| ------- | ------------------------------------------ | --------------- |
+| −73.3% | **−0.01** HS / **+0.27** MMLU | wash            |
+| −75.0% | **+0.28** HS / **+0.44** MMLU  | wash / marginal |
+| −80.0% | **+1.14** HS (row 7e vs row 0d)      | **real**  |
+
+Hand-picking `ρ_input=0.25` is therefore harmless down to about −75%, and costs over a
+point by −80%, where there is no slack left to absorb budget spent on the wrong axis.
+The solve takes seconds offline, so just always run it. Caveat: 0.1875 is the best
 *grid point* (neighbours 0.125 / 0.25), not a continuum optimum.
 
-### Two operating points to quote
+### The operating points
 
-Neither dominates the other — pick by which axis you are defending:
+The curve above is the frontier; these are the points worth quoting:
 
-|                                      | `ρ_input` | `ρ_channel` | cut               | HellaSwag       | MMLU            |
-| ------------------------------------ | ------------ | -------------- | ----------------- | --------------- | --------------- |
-| **best accuracy**              | 0.25         | 0.10           | −73.3%           | **74.64** | **77.67** |
-| **deepest at ~equal accuracy** | 0.1875       | 0.125          | **−75.0%** | 74.08           | *running*     |
+|                                    | `ρ_input` | `ρ_channel` | cut               | HellaSwag       | MMLU            |
+| ---------------------------------- | ------------ | -------------- | ----------------- | --------------- | --------------- |
+| **best accuracy**            | 0.25         | 0.10           | −73.3%           | **74.64** | 77.67           |
+| **best MMLU at that budget** | 0.1875       | 0.1417         | −73.3%           | 74.63           | **77.94** |
+| **deepest within ~6pt**      | 0.1575       | 0.095          | **−80.0%** | 72.55           | 76.11           |
 
-Local trade rate between them is ≈0.33pt per pp of cut.
+The two −73.3% rows are statistically tied on HellaSwag; prefer the solved split, which
+is +0.27 on MMLU at the same cost. Going from −73.3% to −80.0% costs 2.08pt HellaSwag /
+1.83pt MMLU for 6.7pp of extra cut (≈0.31 / 0.27pt per pp).
 
 ### Running an eval — the operational parts
 
@@ -885,9 +1099,14 @@ Three things the offline screen got wrong or could not see:
   *pattern* is still fine, but a large move along `ρ_input` at fixed pattern is not —
   and the error is in the safe direction here (it under-sold the winner's margin).
 
-MMLU is running for `wsp_tau` (the best measured), `wsp_rect` (the cheap variant that
-ties it), `wsp_tau_router`, and the `probe_col_r1125` control — the last so the MMLU
-comparison has an iso-cost reference at this depth.
+**MMLU at −80.0%, measured:** `wsp_rect` **77.62**, `wsp_tau_router` **77.82**, and the
+iso-cost column-only control `probe_col_r1125` **75.82** — so the unstructured gain is
+**+1.80 to +2.00pt on MMLU** at identical reads, against +3.46pt on HellaSwag. Smaller
+than on HellaSwag, consistent with MMLU's shallower rel_err slope (−20.3 vs −24.5)
+everywhere else in this doc. `wsp_tau`'s own MMLU (the best HellaSwag row) **OOM'd on
+2026-08-14** when it was co-scheduled onto a GPU already holding 17.5 GiB and has been
+relaunched on 4 dedicated GPUs; until it lands, `wsp_tau_router` (77.82) is the best
+measured MMLU here even though it is the *worse* HellaSwag arm.
 
 **The cost claim is verified on the model, not just asserted.** The threshold mode
 floats its read set per token, so `weight_sparse` counts what it actually reads and
@@ -904,6 +1123,488 @@ Wall-clock, for planning: the scoring pass costs 1.6× a full-width `gate+up` fo
 0.09pt.
 
 ---
+
+## `input_only`: stop scoring, just compute on the sparse input
+
+> Every method above spends input sparsity on a **decision** and then re-reads the
+> served weights at full width to **compute**. What if the sparse read *is* the
+> computation?
+
+**Verdict up front: it does not work, and the reason is quantified.** At identical
+used-parameters the one-pass method loses **2.21 / 2.73 / 5.17pt** HellaSwag to
+two-pass `input_sparse` at −70 / −75 / −80%, so the exact pass it deletes is worth far
+more than the third of the budget it consumed. Two findings survive and are worth more
+than the method: **`router` read allocation is worth +8.9 to +21.8pt here** — the
+largest single effect in this document — and **the rel_err ladder is badly broken for
+any method that perturbs channel *values*** rather than the keep-mask (it missed by up
+to 22.9pt and does not even rank the two arms correctly).
+
+### The method
+
+Delete the second pass. Per token:
+
+1. rank the token's input coordinates by `|x_i|`, keep the top `ρ_input`
+   (allocated across the token's K experts by `uniform` or `router`, the same
+   allocator `input_sparse` uses);
+2. run `gate`/`up` **on those coordinates only**, and treat the result as the FFN's
+   actual intermediate — `h̃_e = SiLU(W_gate^(e) x_sp) ⊙ (W_up^(e) x_sp)`;
+3. keep the pooled top-`B = ρ_channel·K·I` of `g_e·|h̃_{e,j}|`;
+4. run `down` on the kept channels only.
+
+There is no proxy and no scorer: **the reads that decide are the reads that
+compute.** Step 3 is `oracle_mag_noW` — the best selector in this doc — applied to
+the intermediate that is actually being used, so **the selection is free**. The
+price is that every kept channel now carries a *value* error, not just the
+selection error. That trade is the experiment.
+
+Read literally it is **one rule applied uniformly to all three matrices**: *read
+only the largest-magnitude coordinates of your own input*. For `gate`/`up` that
+input is `x`; for `down` it is the intermediate, whose top-magnitude coordinates
+are exactly the pooled top-B. Implementation: criterion `input_only`
+(`src/dynamic_active_param/input_only.py`, forward in `block.py`).
+
+### Accounting: two things disappear at once
+
+Units of one expert `(I,H)` matrix, a dense FFN being 3:
+
+```
+gate : all I rows, ρ_input of the H columns   ->  ρ_input
+up   : same                                  ->  ρ_input
+down : only the kept channels' columns       ->  ρ_channel
+
+used = (2·ρ_input + ρ_channel) / 3
+```
+
+| | `oracle_mag_noW` | `input_sparse` (two-pass) | **`input_only`** |
+|---|---|---|---|
+| cost | `(1+1+ρ_ch)/3` | `ρ_ch + 2ρ_in/3` | **`(2ρ_in + ρ_ch)/3`** |
+| floor | **2/3** (gate+up full width) | none | none |
+| kept rows billed | once | **twice** (scoring + compute) | once |
+| cheap axis | — | `ρ_input` (2/3 vs 1) | **`ρ_channel` (1/3 vs 2/3)** |
+
+Two consequences worth stating plainly:
+
+- **It is a plain read count, not a conservative frame.** `input_sparse`'s
+  `used = ρ_ch + 2ρ_in/3` deliberately bills the overlap between its two passes
+  twice ([Used-parameter accounting](#used-parameter-accounting)). One-pass has no
+  overlap to bill, so nothing here is conservative *or* flattering.
+- **The cheap axis inverts.** `∂used/∂ρ_input = 2/3` but `∂used/∂ρ_channel = 1/3`,
+  so a unit of `ρ_channel` now costs **half** a unit of `ρ_input`. The standing
+  advice "cut `ρ_input` first" — correct for `input_sparse`, where `ρ_channel` cost
+  1 — **does not carry over**. Pinned in `test_rho_channel_is_the_cheap_axis`.
+
+Two anchors, both unit-tested: at `ρ_input = 1` the method reproduces
+`oracle_mag_noW` bit-for-bit **and** its cost `(2+ρ_ch)/3` equals
+`oracle_mag_noW`'s `(1+1+ρ_ch)/3` exactly — the frames agree precisely where the
+methods coincide. At `ρ_channel = 1` it is pure input sparsity with no channel
+selection, `used = (2ρ_in+1)/3`.
+
+### The split: symmetric is the right answer
+
+Since `used = (2ρ_in + ρ_ch)/3`, setting **`ρ_input = ρ_channel = C`** puts the
+used-parameter cut exactly at `1 − C` — a −75% cut simply *is* "read a quarter of
+every input". That is both the literal reading of the method and, as measured, the
+operating point to use. Solved over an iso-cost grid
+(`scripts/input_only_error.py`, 4 layers × 8192 C4 tokens, `router`):
+
+| budget | cut | best split `(ρ_in, ρ_ch)` | rel_err | symmetric | gain for solving |
+|---|---|---|---|---|---|
+| 0.30 | −70.0% | 0.3500 / 0.2000 | 0.3520 | 0.3545 | **+0.07pt** |
+| 0.25 | −75.0% | 0.2750 / 0.2000 | 0.4044 | 0.4108 | **+0.17pt** |
+| 0.20 | −80.0% | 0.2250 / 0.1500 | 0.4707 | 0.4764 | **+0.15pt** |
+
+The optimum leans consistently toward *more* scoring than symmetric (fidelity of the
+values beats channel count, all three budgets, same sign) — but only by 0.07–0.17pt,
+inside this instrument's noise and inside the range where this repo has already
+measured iso-cost split changes to be [a wash](#how-to-split-a-fixed-budget-between-the-two-sparsities).
+Every eval row below uses the symmetric split.
+
+> ⚠️ **This table is the only claim in the section that still rests on the offline
+> instrument, and that instrument is [discredited for this
+> method](#the-ladder-broke-here-and-now-we-know-by-how-much) — it under-predicted by
+> up to 22.9pt and mis-ranked the two arms.** The split was never measured
+> end-to-end. Since the optimum leans toward more `ρ_input` and the instrument
+> systematically *under*-penalizes value error, the true optimum plausibly leans
+> further that way than 0.07–0.17pt suggests. Read this as "symmetric is a reasonable
+> default", not as a solved split. It is moot in practice: the method is dominated at
+> every budget, so the split is not worth measuring.
+
+### `router` allocation is worth 15–37× more here — the section's real finding
+
+Measured end-to-end, symmetric split, `uniform` vs `router` at identical cost and
+identical reads/token:
+
+| cut | HellaSwag `uniform` | **`router`** | Δ | MMLU `uniform` | **`router`** | Δ | offline predicted |
+|---|---|---|---|---|---|---|---|
+| −70.0% | 64.33 | **73.18** | **+8.85** | 70.24 | **77.60** | **+7.36** | +3.0 |
+| −75.0% | 56.95 | **71.35** | **+14.40** | 62.82 | **76.06** | **+13.24** | +3.5 |
+| −80.0% | 45.58 | **67.38** | **+21.80** | 49.52 | **73.97** | **+24.45** | +3.9 |
+
+**This is the largest single effect measured anywhere in this document** — an order of
+magnitude past the +0.58pt the same allocation buys the two-pass scorer, and 3–6×
+past its own offline prediction. It also *rescues* the method: without it, `uniform`
+at −80% is at **45.58**, i.e. no better than Level-1 `pivchol` at −87.5% (44.15).
+
+The mechanism follows from the method. Under `input_sparse` a mis-allocated read only
+degrades a *ranking* that the exact pass then recomputes anyway, so the damage is
+bounded by one wrong channel choice. Here it degrades the expert's **values**, which
+nothing downstream repairs — and those value errors then compound through 48 layers.
+Weighting reads by `g_e·|x_i|` spends fidelity where the router already said the
+output mass is, and the tokens it starves are the ones whose contribution is scaled
+down by a small `g_e` anyway. It remains free: one bisection over a sort the layer
+computes regardless.
+
+Two readings worth carrying:
+
+- **`router` allocation composes with rigid read sets and not with adaptive ones.**
+  +0.58pt for column scoring, **−0.46pt** for the `tau` threshold ladder (which
+  already floats the read set per token), **+8.9 to +21.8pt** here — where the read
+  set is rigid *and* the reads carry the values. The value of reallocating reads
+  scales with how much the read set determines the *output* rather than the ranking.
+- **Its value grows sharply as the budget tightens**, from +8.85 to +21.80pt over
+  10pp of cut. The doc previously observed this trend at +0.53→0.66pt; here the same
+  trend has ~30× the slope, because at `ρ=0.2` a uniformly-starved expert has almost
+  no signal left to contribute.
+
+### Measured
+
+Qwen3-30B-A3B, masking simulation for `down_proj` only (the `gate`/`up` sparsity is
+real, not simulated), no fine-tuning. Dense = **78.56** / **80.91**. Symmetric split,
+`k_min=0`, all 12 runs rc 0 with the realized `USED PARAMS` and `B` verified in-run.
+Configs `configs/eval/qwen3_30b_a3b_inputonly_{uni,rtr}_cut{700,750,800}_*.yaml`,
+runner `scripts/run_input_only_sweep.sh`, harvest `scripts/input_only_collect.sh`.
+
+| cut | `ρ_in` = `ρ_ch` | `B` | reads | arm | HellaSwag | Δ dense | MMLU 5-shot | Δ dense |
+|---|---|---|---|---|---|---|---|---|
+| −70.0% | 0.300 | 1843 | 614 | `uniform` | 64.33 | −14.23 | 70.24 | −10.67 |
+| −70.0% | 0.300 | 1843 | 614 | **`router`** | **73.18** | −5.38 | **77.60** | −3.31 |
+| −75.0% | 0.250 | 1536 | 512 | `uniform` | 56.95 | −21.61 | 62.82 | −18.09 |
+| −75.0% | 0.250 | 1536 | 512 | **`router`** | **71.35** | −7.21 | **76.06** | −4.85 |
+| −80.0% | 0.200 | 1229 | 410 | `uniform` | 45.58 | −32.98 | 49.52 | −31.39 |
+| −80.0% | 0.200 | 1229 | 410 | **`router`** | **67.38** | −11.18 | **73.97** | −6.94 |
+
+**12/12 complete.** Both metrics monotonic in the budget within each arm. MMLU
+degrades more gracefully at every point, as everywhere else in this doc (−3.31 vs
+−5.38 at −70%, widening to −6.94 vs −11.18 at −80%).
+
+### Verdict: dominated by the two-pass scorer, and the gap widens
+
+The comparison at identical `used`, against the measured best-practice `input_sparse`
+curve:
+
+| cut | **`input_only` + `router`** | `input_sparse` + `router` | Δ HellaSwag | Δ MMLU |
+|---|---|---|---|---|
+| −70.0% | 73.18 / 77.60 | 75.39 / 78.63 † | **−2.21** | **−1.03** |
+| −75.0% | 71.35 / 76.06 | **74.08 / 77.77** | **−2.73** | **−1.71** |
+| −80.0% | 67.38 / 73.97 | **72.55 / 76.11** | **−5.17** | **−2.14** |
+
+† interpolated between the measured −68.3% (75.78 / 78.98) and −73.3% (74.63 / 77.94)
+points; the other two rows are exact measured matches (doc rows 7b and 7e).
+
+**Deleting the exact pass is a losing trade, and it gets worse with depth.** Read as
+budget rather than accuracy: two-pass reaches one-pass's −70% score (73.18) at about
+**−78.0%**, so keeping the second pass buys **8pp more cut at equal accuracy** — and
+one-pass's −75% and −80% scores fall off the bottom of the measured two-pass curve
+entirely. The intuition the offline screen missed: spending a third of the budget on a
+decision you then discard *looks* wasteful, but what you buy with it is exact values
+on every kept channel, and value errors are the ones that compound across 48 layers.
+
+So `input_only` is a **negative result as a method** — but a clean one, and the two
+things it establishes are reusable: the `router` allocation result above, and the
+ladder-scope result below.
+
+### The ladder broke here, and now we know by how much
+
+It failed in **two separate ways**, and the first is the more dangerous.
+
+**1. It mis-ranked the two methods.** On the same instrument, in the same pass,
+`input_only` measured *lower* block-output error than two-pass `input_sparse` at two of
+three budgets:
+
+| cut | `input_only` + `router` | `input_sparse` + `router` | offline said | **evals said** |
+|---|---|---|---|---|
+| −70.0% | 0.3545 `(0.30/0.30)` | 0.3658 `(0.1875/0.1750)` | one-pass **+0.30pt** | one-pass **−2.21pt** |
+| −75.0% | 0.4108 `(0.25/0.25)` | 0.4121 `(0.1875/0.1250)` | one-pass **+0.03pt** | one-pass **−2.73pt** |
+| −80.0% | 0.4764 `(0.20/0.20)` | 0.4655 `(0.1575/0.0950)` | one-pass −0.29pt | one-pass **−5.17pt** |
+
+The screen's verdict was "an iso-cost tie that crosses over"; the truth is "dominated
+at every budget, gap widening". A screen that gets the *sign* wrong on a cross-method
+comparison is worse than no screen, and the instrument reproduces the doc's published
+two-pass anchors to four decimals — so this is not a measurement bug, it is the
+objective being wrong.
+
+**2. It mis-predicted the levels.** Every prediction missed low, and the misses are
+not small:
+
+| arm | cut | rel_err | predicted HS | measured HS | resid |
+|---|---|---|---|---|---|
+| `router` | −70.0% | 0.3545 | 75.6 | 73.18 | **−2.42** |
+| `router` | −75.0% | 0.4108 | 74.1 | 71.35 | **−2.76** |
+| `router` | −80.0% | 0.4764 | 72.4 | 67.38 | **−5.00** |
+| `uniform` | −70.0% | 0.4698 | 72.6 | 64.33 | **−8.23** |
+| `uniform` | −75.0% | 0.5430 | 70.6 | 56.95 | **−13.67** |
+| `uniform` | −80.0% | 0.6236 | 68.5 | 45.58 | **−22.92** |
+
+Fitting the *effective* slope per arm against the doc's validated −26.4 pt/unit for
+selector changes:
+
+| arm | HellaSwag slope | MMLU slope |
+|---|---|---|
+| `router` | **−47.9** | −29.8 |
+| `uniform` | **−122.2** | −135.2 |
+| (validated, selector changes) | −26.4 | −20.3 |
+
+**A unit of single-layer rel_err costs 1.8–4.6× more accuracy when it comes from
+corrupted values than when it comes from a mis-selected channel.** And worse, the
+instrument does not even *order* the two arms — `uniform` at rel_err **0.4698** scores
+**64.33** while `router` at a *higher* **0.4764** scores **67.38**:
+
+| rel_err | arm | cut | HellaSwag |
+|---|---|---|---|
+| 0.3545 | `router` | −70% | 73.18 |
+| 0.4108 | `router` | −75% | 71.35 |
+| **0.4698** | `uniform` | −70% | **64.33** |
+| **0.4764** | `router` | −80% | **67.38** |
+| 0.5430 | `uniform` | −75% | 56.95 |
+| 0.6236 | `uniform` | −80% | 45.58 |
+
+**The cause is the same one that closed the cross-layer schedule.** The surface
+measures each layer against an **unperturbed** input, deliberately, so layers stay
+separable. That is sound when the perturbation is a keep-mask: dropping a channel is a
+bounded, self-limiting error that the next layer sees as a slightly-wrong input. It is
+unsound when the perturbation is to the *values*, because then every one of the 48
+layers feeds the next a corrupted input and the errors compound multiplicatively —
+which is exactly why the residuals grow with rel_err (−2.4 at 0.35, −22.9 at 0.62)
+rather than staying constant.
+
+**So the ladder's scope, restated** — the third and sharpest revision it has taken in
+this doc:
+
+| change being screened | ladder error | status |
+|---|---|---|
+| which channels a layer selects (fixed budget) | ±0.26pt | **validated** |
+| the read *pattern* at fixed budget (`weight_sparse`) | ≤0.6pt | validated |
+| a large move along `ρ_input` at fixed pattern | 1.95pt | unreliable |
+| budget moved *between* layers | 1.0pt, wrong sign | **broken** |
+| **the channel values themselves (`input_only`)** | **2.4–22.9pt, wrong sign across methods and not rank-preserving across arms** | **badly broken** |
+
+Any future method where the cheap read feeds the computation needs its own end-to-end
+anchor. A single-layer error surface will systematically **flatter** it, and worst
+exactly where the method is worst — the residual grew from −2.4pt at rel_err 0.35 to
+−22.9pt at 0.62. The general rule this suggests: a separable, single-layer objective is
+sound for perturbations that a downstream layer sees as *noise on its input*, and
+unsound for perturbations that *change what the layer computes*, because only the
+latter compound.
+
+### What it does establish
+
+- **The exact second pass is worth 2.2–5.2pt HellaSwag**, i.e. far more than the
+  third of the budget it consumes. This is the first direct measurement of what
+  `input_sparse`'s two-pass structure actually buys, and it justifies the structure.
+- **Read allocation is the dominant lever once reads carry values** (+8.9 to
+  +21.8pt). Free, and it grows with depth.
+- **A single-layer rel_err surface cannot screen a value-perturbing method.** Cost:
+  one 12-eval sweep to learn, which is cheap for a scope boundary this sharp.
+- The engineering advantages are real but cannot pay for the accuracy: one pass
+  instead of two (no scoring overhead, no gather between passes), zero extra storage,
+  no probe object, no calibration, and the selector question disappears entirely
+  (`oracle_mag_noW`'s choice is exact by construction). At −2.2 to −5.2pt they are not
+  enough — **spend the reads on `input_sparse` instead.**
+
+---
+
+---
+
+## Rotated read sets: porting lm_head's `S1` screen
+
+> Every method above picks the token's read set in the **standard basis** — top
+> `ρ_input` coordinates by `|x_i|`. `docs/exps/lm_head/results_lm_head.md` §3b found
+> that on the lm_head this is the *wrong* basis by a factor of 2.8× (adaptive
+> KL 0.805 `raw` vs 0.287 `ceig`): rank the coordinates of `z = Uᵀx` instead, with
+> `U` the eigenvectors of `C = E[x xᵀ]`, and the same read budget captures far more.
+> Does that transfer to expert FFNs?
+
+**Verdict: no. Every form that pays for its own rotation loses by 0.9–4.4pt, and
+the one form whose rotation is free gains +0.32pt — inside the noise floor.** The
+mechanism is real but small once the basis has to be *estimated*, and the part of it
+that looked large is a covariance-overfitting artifact.
+
+### Why the rotation is not free here, and the three forms that follow
+
+The screen is the same arithmetic as lm_head's: projecting the hidden state and
+multiplying by the unrotated `W` is identical to reading `r0` columns of the rotated
+`W U`, since `W U_S U_Sᵀ x == W x̃`. What differs is **who pays for `z`**. On the
+lm_head the rotation costs `D²` against a `V×D` read — 1.35%, negligible. In an MoE
+layer the comparable ratio is `H²` against `K·3·I·H`, and that is **not** negligible:
+
+```
+scoring   2·r0/(3H)          r0 columns of both branches, all I rows
+compute   ρ_channel          all three matrices gathered to the kept channels
+rotation  r'/(3·K·I)         H·r' reads of U_{r'}, shared by the token's K experts
+                             = 0.1111 for the full basis (r'=H) on this model
+```
+
+At the −75% operating point the whole budget is `used = 0.25`, so a full per-layer
+rotation eats **44% of it** before a single weight column is read. Three ways out,
+with three different bills:
+
+| form                        | basis            | rotation cost      | extra storage | why                                                                                         |
+| --------------------------- | ---------------- | ------------------ | ------------- | ------------------------------------------------------------------------------------------- |
+| **`rot_full`**        | per-layer`U`   | `H/(3KI)` = .1111 | **0**   | rebase the served weights (`W ← WU`); the compute pass then needs all of `z`             |
+| **`rot_lr`**          | per-layer`U_r'` | `r'/(3KI)`       | `2r'/(3H)`  | store a separate rank-`r'` probe `W·U_{r'}`; compute stays in the original basis         |
+| **`rotglob`** (free)  | one global`U`  | **0**        | **0**   | rotate the residual stream *once*, QuaRot-style, folding `U` into every weight that reads or writes it — then `z` **is** the residual state |
+
+`rotglob` is the interesting one: RMSNorm commutes with an orthogonal rotation
+(`‖Ux‖ = ‖x‖`) once `γ` is folded forward, so the whole model can be rebased offline
+and the rotation genuinely costs nothing at run time. The price is that **one basis
+must serve all 48 layers**. `rot_full` keeps each layer's own optimum but must
+materialize `z = U_ℓᵀx`, an `H²` matvec per layer per token.
+
+This taxonomy is also what makes "count `U` or not" a real question rather than a
+bookkeeping choice: **`rotglob` is the only honest way to not count it.**
+
+### The basis is the whole experiment, and it overfits
+
+`C` is `2048×2048`. A capture holds 8192 tokens, so `T/H = 4` and the sample
+eigenbasis fits noise. Measured (`scripts/probe_rotate_diag.py`), captured input
+energy at `r0 = 384` reads:
+
+| basis for the top-`r0` `|z|` rule | L6              | L22             | L38             | L46              |
+| --------------------------------------- | --------------- | --------------- | --------------- | ---------------- |
+| raw`|x_i|` (what `input_sparse` does) | 0.691           | 0.684           | 0.744           | 0.765            |
+| eigenbasis,**in-sample**          | **0.856** | **0.874** | — | **0.909** |
+| eigenbasis,**held out**           | 0.709           | 0.707           | —              | 0.761            |
+
+**The +0.17 in-sample gain collapses to +0.02 held out, and at L46 it goes
+negative.** So the first read of "the rotation halves the dropped energy" was an
+artifact. A learning curve over the fit-set size (512 → 6144 tokens) climbs ~+0.010
+energy per doubling, which is why the real experiment needed a properly estimated
+basis, not a capture-sized one: `scripts/probe_cov_collect.py` accumulates `C` for
+all 48 MoE layers over **158 853 non-pad C4 tokens** (`T/H = 77`), storing only the
+`H×H` matrix per layer so more tokens cost no more memory. Padding is excluded —
+44% of the batch grid is padding here, the same trap as lm_head's bug 1.
+
+Every rotated arm below is therefore run against four bases: `heldout` (capture,
+`T/H=2`), `calib` (the 158k-token collection), `oracle` (fit on the very tokens
+being scored — **unachievable**, an upper bound on any calibration effort), and the
+pooled-over-all-48-layers versions for the free form.
+
+### Measured: iso-cost at −75%
+
+Layer-averaged block-output `rel_err`, 4 layers × 4096 C4 tokens, `router`
+allocation, `ρ_channel = 0.125`. The instrument reproduces this doc's published
+anchors **to four decimals** — `oracle_mag_noW` 0.3272, `input_sparse` uniform
+0.4099 / router 0.3860 at `ρ_input=0.25` — so these numbers are on the same scale as
+everything above. Δpt uses the validated −26.4 (HellaSwag) / −20.3 (MMLU) slopes.
+The baseline is the doc's own −75% operating point: `input_sparse` + `router` at
+`ρ_input=0.1875` (`r0=384`), measured end-to-end at **74.08 HS / 77.77 MMLU**.
+
+**Setting A — the rotation is billed as active parameters.** Every row is at
+`used = 0.2500`; `r0` is whatever the budget allows *after* the rotation is paid for:
+
+| arm                                   | basis            | `r'` | `r0` | rot cost      | extra storage   | `rel_err`      | ΔHS pred          | ΔMMLU pred |
+| ------------------------------------- | ---------------- | ------ | ------ | ------------- | --------------- | ---------------- | ------------------ | ---------- |
+| **`input_sparse` (baseline)**   | —               | —     | 384    | 0             | **0**     | **0.4134** | —                 | —         |
+| `rot_lr`                            | `calib`        | 768    | 256    | 0.0417        | 25.0%           | 0.4477           | **−0.91**   | −0.70     |
+| `rot_lr`                            | `calib`        | 1152   | 192    | 0.0625        | 37.5%           | 0.4501           | **−0.97**   | −0.75     |
+| `rot_lr`                            | `calib`        | 510    | 299    | 0.0277        | 16.6%           | 0.4758           | −1.65             | −1.27     |
+| `rot_full`                          | `calib`        | 2048   | **43** | 0.1111        | 0               | 0.5800           | **−4.40**   | −3.38     |
+| *`rot_lr`, oracle basis*            | *`oracle`*   | 1152   | 192    | 0.0625        | 37.5%           | *0.3960*       | *+0.46*         | *+0.35*  |
+| *`rot_full`, oracle basis*          | *`oracle`*   | 2048   | 43     | 0.1111        | 0               | *0.5114*       | *−2.59*        | *−1.99* |
+
+**Setting B — the rotation is not billed.** All rows read `r0 = 384` columns at
+`ρ_channel = 0.125`, i.e. exactly the baseline's cost:
+
+| arm                                    | basis                       | rotation really free? | `rel_err`      | ΔHS pred          | ΔMMLU pred |
+| -------------------------------------- | --------------------------- | --------------------- | ---------------- | ------------------ | ---------- |
+| **`input_sparse` (baseline)**    | —                          | —                    | **0.4134** | —                 | —         |
+| **`rotglob`**                    | `globcalib` (48 layers)   | **yes**         | **0.4013** | **+0.32**   | **+0.25** |
+| `rot_full`, unbilled                 | `calib` per-layer         | no                    | 0.3863           | +0.72             | +0.55     |
+| `rot_full`, unbilled                 | `heldout` (capture)       | no                    | 0.4096           | +0.10             | +0.08     |
+| *`rot_full`, unbilled*               | *`oracle`* (upper bound) | no                    | *0.3575*       | *+1.47*         | *+1.13* |
+| *`rotglob`, unbilled*                | *`globoracle`*            | yes                   | *0.3786*       | *+0.92*         | *+0.71* |
+| static rank-384 subspace               | `calib`                   | (0.0208 billed)       | 0.5055           | **−2.43**   | −1.87     |
+
+### What the two tables say
+
+- **Counting `U` closes the idea outright.** The cheapest achievable arm is −0.91pt
+  *and* asks for 25% extra storage; the zero-storage arm (`rot_full`, which must
+  rebase the served weights and therefore pay the full `H²`) is −4.40pt, because
+  after the rotation it can only afford **43** of 2048 coordinates. Even the
+  **oracle** basis — which cannot be built — tops out at +0.46pt for 37.5% of extra
+  storage. There is no version of this trade that works.
+- **Not counting `U` is only legitimate for `rotglob`, and it buys +0.32pt.** That is
+  free in both reads and storage, and it is a real deployable object (one offline
+  rebase of the residual stream). But 0.32pt sits inside the eval stderr (≈0.42pt
+  HellaSwag) and inside the ladder's own demonstrated residual band (−0.08 to −1.95pt
+  across this doc). Compare `router` allocation: predicted +0.66, measured +0.58 at
+  this budget — and *−0.11* one budget looser. A +0.32pt prediction is not a
+  shippable claim.
+- **Per-layer bases are worth ~2× the global one** (+0.72 vs +0.32 unbilled) —
+  exactly the quantity you cannot have for free, since a shared basis is what makes
+  the rotation cost nothing. The mechanism and its affordability are anti-correlated.
+- **The basis has not converged, and it does not matter.** `calib` (158k tokens) is
+  still 0.029 rel_err short of `oracle`, so more calibration would keep improving
+  Setting B. It cannot rescue Setting A, because `oracle` *is* the ceiling there and
+  `oracle` already loses at every `(r', r0)` except one that costs 37.5% storage for
+  +0.46pt.
+- **The static-subspace control is dead again**, on a third axis: a fixed rank-384
+  activation eigen-subspace (no per-token choice) scores 0.5055 against 0.4134 for
+  the per-token raw rule — **−2.43pt**. This is the same
+  [unifying negative result](#unifying-negative-result) as ever: an operator fixed
+  offline reproduces only the average token. Note this arm *is* activation-aware
+  input-side low-rank, i.e. the family §3 already killed by recall, now killed by
+  output error too.
+- **The column-norm factor is a wash**, as it is in the raw basis. lm_head gate 0g
+  needs `|z_i|·‖W u_i‖`; here it moves `rel_err` by 0.0005–0.0007 (`rotglob`
+  0.4008 vs 0.4013), i.e. +0.02pt. The rotated column norms are more spread than the
+  raw ones (CV 0.040–0.048 vs 0.022–0.036) and still far too uniform to matter.
+
+### Why S1 transfers to the lm_head and not to this
+
+Three differences, all structural rather than incidental — worth recording because
+they predict *which* future lm_head ideas are worth porting:
+
+1. **The rotation's cost is amortized over the wrong thing.** `D²` against a `V×D`
+   read is 1.35%; `H²` against `K·3·I·H` is 11.1%, because an MoE layer reads only
+   `K` of its `E` experts. The lm_head is one enormous matrix, which is exactly the
+   shape that makes a `D×D` preprocessing step free.
+2. **The screen has somewhere cheaper to go.** S1's alternative to a rotated screen
+   was a *static frequency tier* (a 700× worse KL). `input_sparse`'s alternative is
+   an already-adaptive per-token `|x_i|` rule, and this model's input energy is
+   **axis-concentrated** — massive-activation coordinates — so the standard basis is
+   already close to the right one. There was a 2.8× gap to collect on the lm_head and
+   roughly a 1.05× gap here.
+3. **A shared basis is worth less than a per-layer one.** The lm_head needs exactly
+   one basis, at one point in the network, so per-layer-vs-global never arises.
+
+The transferable rule: **port an lm_head read-axis method only when the rotation's
+`D²` analogue is small against the read it saves.** The `rot_lr` variant — one basis
+shared across a layer's 128 experts, coefficients per expert — was the design built
+specifically to beat that arithmetic, and it does beat plain `lowrank_scorer` by 16×
+on cost per read; it still loses, because the *basis quality* term rather than the
+cost term is binding.
+
+### Reproducing
+
+```bash
+# 1. mechanism gate: does the eigenbasis concentrate x better than |x|? (CPU, ~5 min)
+python scripts/probe_rotate_diag.py --layers 6,22,38,46
+# 2. a basis worth screening: all 48 layers' C over ~160k non-pad C4 tokens
+#    (4 GPUs, ~20 min; do NOT set HF_HUB_OFFLINE=1 -- the c4 shard config must resolve)
+CUDA_VISIBLE_DEVICES=0,1,2,3 PER_GPU_MEM=36GiB \
+  python scripts/probe_cov_collect.py --tokens 262144 --layers all
+# 3. the iso-cost screen, both accounting settings (1 GPU, ~25 min)
+CUDA_VISIBLE_DEVICES=0 python scripts/probe_rotate_screen.py
+CUDA_VISIBLE_DEVICES=0 python scripts/probe_rotate_screen.py --colnorm --ratios 0.125 \
+  --arms "raw:-:384:router,globcalib:2048:384:router,calib:2048:384:router"
+```
+
+**No end-to-end eval was spent on this**, by decision: the screen's anchors are
+exact, Setting A loses by more than the ladder's worst-ever residual, and Setting B's
++0.32pt is below the resolution an eval would give. If it is ever revisited, the only
+arm worth the ~13 GPU-hours is `rotglob` at `r0=384` — and it needs `install.py`
+support for a residual-basis rebase, which does not exist.
 
 ---
 
@@ -1047,6 +1748,7 @@ are the evidence that compressing the *weight* never pays, which is what motivat
 | Static pre-filter (ban low-freq channels)                        | loses 12–18% of top-B mass at 25% ban                              | Keep-frequency near-uniform                                                      |
 | Per-row weight sparsity                                          | recall 0.622                                                        | Below top-`\|x\|` at serving precision (0.716) and needs extra indexed structure |
 | Static input subset (one fixed coordinate set)                   | recall 0.558                                                        | Overlap of top-`\|x\|` with a global set is only 0.375                           |
+| Activation-eigenbasis rotation of the read set (lm_head`S1`)   | free/global form **+0.32pt** predicted; every self-paying form **−0.9…−4.4pt** | `H²/(3KI)` = 11.1% of the entire −75% budget, and the only *free* form needs one basis for all 48 layers, which captures half the concentration. [Full section](#rotated-read-sets-porting-lm_heads-s1-screen) |
 | Discriminability-weighted input                                  | ≈ top-`\|x\|`                                                      | `CV(Var_j W) = 0.042`; 93.8% identical selection                               |
 | Floating the per-token**channel** budget under a global τ | −0.16…−0.32pt at iso-cost                                        | Score is already`g_e`-scaled; τ tracks router confidence                      |
 
@@ -1074,6 +1776,7 @@ columns to read.
 | tool                                                                         | what it does                                                                                                                                                                                                                                                                                                                                           | when to use                                                                                                                                                                      |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Unstructured read-set screen** (`scripts/wsparse_screen.py`)       | One`rel_err` table over the whole column-vs-entry family at an identical read budget: staircase rectangles, graded ladders, the budget-exact `                                                                                                                                                                                                       | W·x                                                                                                                                                                             |
+| **One-pass error screen** (`scripts/input_only_error.py`)            | `rel_err` for `input_only`, where the mask lands on the **approximate** intermediate so the error cannot be computed from the dropped channels alone (`probe_output_error.py`'s shortcut). Sweeps `(ρ_input, ρ_channel)` along iso-cost lines and measures `oracle_mag_noW` + two-pass `input_sparse` in the same pass                                                                                                                                                                                                                                          | **⚠️ Do not trust its verdicts.** It called `input_only` an iso-cost tie with `input_sparse`; the evals showed it dominated by 2.2–5.2pt, and its level predictions missed by up to 22.9pt. Kept because it is the correct *mechanics* for a value-perturbing method and because that failure is [the scope lesson](#the-ladder-broke-here-and-now-we-know-by-how-much) — but any such method needs a real eval |
 | **Scoring-pass benchmark** (`scripts/wsparse_bench.py`)              | Wall-clock of each scorer per MoE block at real dimensions, relative to one full-width`gate+up`, with the `tau` bisection timed separately                                                                                                                                                                                                         | Before committing to an eval: this is how the 54×→0.8× and 359→140 ms fixes were found                                                                                       |
 | **Output-error ladder** (`scripts/probe_output_error.py`)            | Measures layer-averaged block-output`rel_err = ‖y_full − y_kept‖/‖y_full‖`; fitted slope −24.3 HellaSwag pt/unit rel_err predicted two measured points to **within 0.1pt**                                                                                                                                                               | Screening any new scorer design — 4 min, 1 GPU, replaces 150 GPU-hours of eval                                                                                                  |
 | **Linearity check** (`scripts/probe_relerr_linearity.py`)            | Regresses rel_err → measured accuracy per layer and per*family*; found the two families are different rulers (−26.4 vs −6.9 pt/unit)                                                                                                                                                                                                              | **Before trusting any rel_err → pt conversion**; use the −26.4 fixed-budget slope for scorer comparisons                                                                 |
@@ -1087,6 +1790,9 @@ columns to read.
 | **Learned probe** (`scripts/lowrank_scorer_learned_probe.py`)        | Trains an online-form scorer on calibration tokens, measures headroom above the SVD                                                                                                                                                                                                                                                                    | Showing whether objective or rank is the bottleneck                                                                                                                              |
 | **Probe capture** (`scripts/probe_capture.py`)                       | Caches per-layer`gate/up/down` activations + `x`, `g_e` for offline analysis                                                                                                                                                                                                                                                                     | Prerequisite for`probe_output_error.py` (needs the `_wd` captures)                                                                                                           |
 | **Low-rank recall** (`scripts/lowrank_scorer_recall.py`)             | Replays exact per-token cross-expert selection over 4 layers × 8192 tokens                                                                                                                                                                                                                                                                            | Scanning the SVD/BTT cost–recall curve                                                                                                                                          |
+| **Basis-concentration gate** (`scripts/probe_rotate_diag.py`)        | Captured input energy per read for four rules (raw/rotated × adaptive/static), **in-sample and held out**, plus a fit-set learning curve and the rotated column-norm CV                                                                                                                                                                        | **Before any change of read *basis*** (~5 min, CPU). It is what showed the eigenbasis' +0.17 energy gain is only +0.02 held out — an in-sample screen would have shipped a fiction |
+| **Input covariance collector** (`scripts/probe_cov_collect.py`)      | Accumulates`C = E[x xᵀ]` and `μ` for all 48 MoE layers over ~160k non-pad C4 tokens, storing only the `H×H` matrix per layer, so 100× more tokens costs no more memory. Excludes padding — 44% of the batch grid                                                                                                                          | Any method needing an activation second moment. A capture-sized`C` (`T/H=4`) is **not** enough for an eigenbasis; this reaches `T/H=77`                                    |
+| **Rotated read-set screen** (`scripts/probe_rotate_screen.py`)       | One`rel_err` table over the rotated-basis family (`rot_full`/`rot_lr`/`rotglob` × four basis qualities, including an unachievable **oracle**), reporting `used` under **both** cost models — rotation billed and not — plus each arm's extra storage                                                                                | Comparing any scorer whose cost depends on a*shared* object. The oracle-basis column is what makes its negative verdict final rather than "needs more calibration"              |
 
 **Methodological lesson:** recall orders correctly *within* a scorer family but
 **not across families** (pearson 0.65 with accuracy). The output-error ladder is
@@ -1104,6 +1810,7 @@ the older two are recorded so old numbers can be re-read:
 | Proxy cost (oldest,`sparse_probe.md`) | cut = 1 − ρ − cB/3        | Prices a*separate* quantized scorer object, which is excluded — and it double-counts nothing but also credits nothing to storage              |
 | Overlap-discounted traffic              | kept = ρ + 2·p·(1−ρ)/3  | Defensible for memory traffic under a perfect cache, but it assumes the kernel keeps the scoring reads resident, and it flatters the method      |
 | **Used parameters (this doc)**    | **kept = ρ + 2·p/3** | **scoring params + compute params, overlap billed twice — conservative, kernel-independent, and identical to `lowrank_scorer`'s frame** |
+| One-pass (`input_only` only)          | kept = (2·p + ρ)/3      | Not an alternative frame for the rows above — it prices a *different method*, one with no second pass and therefore no overlap to bill. Reduces to `oracle_mag_noW`'s `(1+1+ρ)/3` at `p=1`, which is the cross-check that the two frames agree where the methods do |
 
 Reading old numbers: the switch from the discounted frame to this one costs
 1.7–4.2pt of quoted cut (e.g. `ρ_input=0.25, ρ_channel=0.10` was −75.0%, now
@@ -1170,6 +1877,14 @@ ladder within noise at a quarter of the metadata (4.3% of the FFN) and less than
 the scoring latency. Do **not** stack `router` allocation on it — that composed for
 column scoring and does not compose here.
 
+**0b. Do NOT reuse the sparse read as the computation — closed negative.**
+[`input_only`](#input_only-stop-scoring-just-compute-on-the-sparse-input) deletes
+`input_sparse`'s exact second pass and loses 2.2–5.2pt HellaSwag at iso-cost, widening
+with depth. Keep the two-pass structure. The transferable parts are that **`router`
+allocation is worth +8.9 to +21.8pt once reads carry values** (so any value-perturbing
+scheme must allocate by `g_e`) and that the **rel_err ladder cannot screen such a
+scheme at all** — it mis-ranked the two methods outright.
+
 **1. Spend the `router` gain on the budget, not on accuracy.** `router` is the one
 allocation win that is *measured* (+0.58pt HellaSwag / +0.47pt MMLU at fixed cost).
 Via the −26.4 slope that is worth **~1.5–2pt of extra cut at fixed accuracy**,
@@ -1215,9 +1930,9 @@ overshoots `router` at every budget).
 | **Channel-block level maps**            | **closed, negative**                                                | Blocks of 8 cut metadata to 2.8% but give back 1.5 of the 3.0pt, landing +0.14pt from the zero-metadata column control;`r=16` converges back onto column sparsity entirely                                                   |
 | **Pooled cross-expert `τ`**          | not attempted                                                             | `router` approximates the pooled `g_e·                                                                                                                                                                                      |
 | **LoRA recovery at the goal point**     | not started                                                               | The 3.92pt HellaSwag / 3.24pt MMLU gap at −73.3% is the size stage-2 LoRA closes elsewhere;**now the largest single win**                                                                                               |
-| **Iso-cost split, MMLU**                | HellaSwag measured, both MMLU arms**re-running**                    | HS gave +0.28pt for the solved split (predicted +0.58, stderr of diff 0.62). MMLU decides whether the split is a real knob or a wash                                                                                           |
-| **Iso-cost split at resolution**        | measured once,**inconclusive**                                      | The +0.28pt gap needs ~4× the samples (or a second budget point) to separate from zero; cheap and it settles whether to solve the split at all                                                                                |
-| **`router` at a deeper ρ**           | partially done (−75.0% measured, 74.08)                                  | The +0.58pt was spent on depth: −75.0% ties the*uniform* −73.3% row but is −0.56pt vs `router` there. −77.5% (`ρ_in=0.1875, ρ_ch=0.10`) is the untested next rung                                                  |
+| **Iso-cost split, MMLU**                | **closed**                                                          | Measured:**+0.27pt at −73.3%, +0.44pt at −75.0%** — consistently positive on MMLU, both inside stderr. Superseded by the depth-dependent verdict below                                                                |
+| **Iso-cost split at resolution**        | **closed by depth, not by samples**                                 | Resolved by a deeper budget instead of more samples: a wash at −73.3%/−75.0% but**+1.14pt HS at −80.0%** (row 7e vs 0d). Solve the split when the budget is tight; hand-picking is fine above −75%                   |
+| **`router` at a deeper ρ**           | **closed**                                                          | Spent on depth and measured to −80.0%: the full curve is 76.61 → 72.55 HS / 79.45 → 76.11 MMLU across −63.3% → −80.0%, ≈0.24pt HS per pp, no cliff                                                                      |
 | **Why the schedule trades HS for MMLU** | observed, unexplained                                                     | The unweighted schedule is −0.16 HS /**+0.65 MMLU** at iso-cost. If the trade is controllable it is a knob, not a bug                                                                                                   |
 | **Non-separable cross-layer objective** | not attempted                                                             | Every separable solve failed; an objective that sees compounding across depth is the only remaining route, and is much more expensive to fit                                                                                   |
 | **Threshold the input reads only**      | measured offline (+0.22pt at used=0.267), not evaluated                   | Free, removes a sort; channel budget must stay a top-B (measured)                                                                                                                                                              |
@@ -1227,6 +1942,17 @@ overshoots `router` at every budget).
 
 **Closed by this round:**
 
+- **The zero-extra-storage frontier is a measured curve, not a point**: six budgets ×
+  two benchmarks (12/12 evals), −63.3% → −80.0%, monotonic with no cliff, reaching
+  **−80.0% at 72.55 HellaSwag / 76.11 MMLU**.
+- **The rel_err ladder generalizes across the whole budget axis** — HellaSwag slope
+  −24.5 (R²=0.997) vs the pre-registered −26.4, and MMLU −20.3 (R²=0.979). One surface,
+  two metrics, per-metric slope.
+- **MMLU degrades more gracefully at every budget and the gap widens with depth**
+  (0.49pt → 1.21pt), with the shallower MMLU rel_err slope as the mechanism.
+- **Solving the iso-cost `ρ_input`/`ρ_channel` split is depth-dependent**: a wash at
+  −73.3%/−75.0% (−0.01 … +0.44pt over four tests) but **+1.14pt at −80.0%**. The
+  hand-picked `ρ_input=0.25` was never costing anything above −75%.
 - **Column-structured sparsity is the wrong shape for the scoring budget** — measured
   end-to-end, not just offline. At identical reads, spending them on
   `(channel, coordinate)` **entries** scores **74.87 vs 71.41** HellaSwag (**+3.46pt**,

@@ -26,6 +26,10 @@ from src.dynamic_active_param.lowrank_scorer import (
     build_layer_scorer,
     print_scorer_accounting,
 )
+from src.dynamic_active_param.input_only import (
+    InputOnlyCfg,
+    print_input_only_accounting,
+)
 from src.dynamic_active_param.sparse_probe import (
     build_layer_probe,
     print_probe_accounting,
@@ -91,7 +95,7 @@ def install_dynamic_alloc(
     # they impose no k_min floor (a dominated expert may get 0 channels).
     cross_expert = criterion in (
         "oracle_mag", "oracle_mag_noW", "oracle_up", "pubsub", "lowrank_scorer",
-        "sparse_probe", "weight_sparse",
+        "sparse_probe", "weight_sparse", "input_only",
     )
     if not cross_expert:
         B = max(K * k_min, min(B, K * I))  # keep feasible
@@ -127,6 +131,14 @@ def install_dynamic_alloc(
             use_gate=sk.get("use_gate", True),
             rho_channel=1.0 - prune_ratio,
             lam=sk.get("lam", 1.0),
+            input_alloc=sk.get("input_alloc", "uniform"),
+        )
+
+    if criterion == "input_only" and verbose:
+        sk = scorer_kwargs or {}
+        print_input_only_accounting(
+            rho_input=sk.get("rho_input", 0.25),
+            rho_channel=1.0 - prune_ratio,
             input_alloc=sk.get("input_alloc", "uniform"),
         )
 
@@ -232,6 +244,17 @@ def install_dynamic_alloc(
             )
             moe_block._dyn_probe_lam = float(sk.get("lam", 1.0))
             per_layer_B = B_L
+
+        # input_only: nothing to build — the method reads the served gate/up
+        # modules directly in the forward, so the per-layer state is just the two
+        # knobs. (Contrast sparse_probe, which needs a SparseProbe holding views
+        # or quantized copies.)
+        if criterion == "input_only":
+            sk = scorer_kwargs or {}
+            moe_block._dyn_io = InputOnlyCfg(
+                rho_input=float(sk.get("rho_input", 0.25)),
+                input_alloc=str(sk.get("input_alloc", "uniform")),
+            )
 
         # weight_sparse: per-column magnitude thresholds (one per staircase level)
         # over this layer's served up/gate, plus the optional mean-fix bias.

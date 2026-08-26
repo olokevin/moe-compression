@@ -11,6 +11,10 @@ they stay vector-crisp in the deck and restyle in one place.
   * ``fig_framework.pdf/.png`` (slide 11) — the two-phase / one-layer-ahead
     pipeline: layer i computes on partially-loaded gate/down while layer i+1's
     full-width up_proj produces the score heat map that drives the fetch.
+  * ``fig_framework_input_sparse.pdf/.png`` — the ``input_sparse`` variant of the
+    same pipeline: the probe reads gate/up on only the token's top-rho_input
+    *input coordinates* (sparse columns), so no matrix runs full width and all
+    three matrices — up included — are gathered to the mask.
 
 Output: ``docs/presentation/figs/``.
 """
@@ -46,7 +50,7 @@ plt.rcParams.update({
 
 
 def _mesh(ax, x0, y0, w, h, nch, nd, lit=None, base=COLD, hot=HOT_A,
-          axis="col", gap=0.10):
+          axis="col", gap=0.10, lit_dim=None):
     """Draw a weight block as a mesh of parameter tiles, lighting the ``lit`` channels.
 
     ``axis="col"``: channels run along x (one channel = a vertical stripe) — this
@@ -55,14 +59,22 @@ def _mesh(ax, x0, y0, w, h, nch, nd, lit=None, base=COLD, hot=HOT_A,
     (I x d), whose channels are their *rows*.  Drawing them differently is the
     honest picture and shows why a channel is "a gate row + an up row + a down
     column".
+
+    ``lit_dim`` additionally restricts the lit tiles along the *hidden-dim* axis,
+    i.e. a tile is hot only if its channel is in ``lit`` **and** its input
+    coordinate is in ``lit_dim``.  That is how ``input_sparse`` reads a weight
+    block: all channels, but only a few input columns.
     """
     lit = set() if lit is None else set(lit)
+    lit_dim = None if lit_dim is None else set(lit_dim)
     nx, ny = (nch, nd) if axis == "col" else (nd, nch)
     cw, ch = w / nx, h / ny
     for i in range(nx):
         for j in range(ny):
-            idx = i if axis == "col" else j
-            c = hot if idx in lit else base
+            idx = i if axis == "col" else j       # channel index
+            dim = j if axis == "col" else i       # hidden-dim (input) index
+            on = idx in lit and (lit_dim is None or dim in lit_dim)
+            c = hot if on else base
             if c == "none":
                 continue
             ax.add_patch(Rectangle(
@@ -405,16 +417,198 @@ def fig_framework(out_dir, seed=3):
     plt.close(fig)
 
 
+def fig_framework_input_sparse(out_dir, seed=3):
+    """The ``input_sparse`` framework figure (§ Parameter-efficient channel router).
+
+    Same two lanes as :func:`fig_framework`, but the scorer changes and with it
+    the whole picture:
+
+    BOTTOM lane = layer i+1's probe. ``gate``/``up`` are read on only the token's
+    top-rho_input input coordinates (3 of 9 columns lit, spread out; the other 6
+    are resident but never touched), and the score
+    ``s_j = g_e |SiLU(g~_j) u~_j|`` comes out of those partial activations — no
+    matrix runs full width, so nothing gates the mask.
+    TOP lane = layer i computing. Because the score no longer *is* ``up_proj``,
+    ``up`` is gathered to the mask like the other two: only the B kept rows are
+    fetched, the rest are never read (white, not grey).
+    """
+    rng = np.random.default_rng(seed)
+    fig, ax = plt.subplots(figsize=(10.2, 4.6))
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+
+    NCH, B, WIDE, ND = 32, 3, 12, 9    # heatmap channels, budget, channel/dim tiles
+    IN_LIT = (1, 4, 7)                 # the 3 of 9 input coords the probe reads
+    # A peaky score profile, like the measured per-token |SiLU(g~) u~| values.
+    score = rng.gamma(0.5, 1.0, NCH)
+    score[rng.choice(NCH, 5, replace=False)] += rng.uniform(2.4, 4.2, 5)
+    score = score / score.max()
+    keep = np.sort(np.argsort(score)[::-1][:5])
+
+    TOP, BOT = 0.590, 0.150
+    LH = 0.300
+    BLUE_D = "#2b5fb8"
+    AMBER_D = "#a8792a"
+    AMBER = "#c99b45"
+    LBL = 0.150
+
+    # ---- lane backdrops + big layer labels ---------------------------------
+    ax.add_patch(FancyBboxPatch(
+        (0.030, TOP - 0.048), 0.940, LH + 0.096,
+        boxstyle="round,pad=0.006,rounding_size=0.016",
+        facecolor="#f7f9fc", edgecolor="#c8cfdb", lw=1.0, zorder=1))
+    ax.add_patch(FancyBboxPatch(
+        (0.030, BOT - 0.048), 0.940, LH + 0.096,
+        boxstyle="round,pad=0.006,rounding_size=0.016",
+        facecolor="#fffdf6", edgecolor="#e6dcc4", lw=1.0, zorder=1))
+    ax.text(0.052, TOP + LH / 2 + 0.028, "Layer $i$", fontsize=12.5,
+            color=BLUE_D, weight="bold", va="center", ha="left")
+    ax.text(0.052, TOP + LH / 2 - 0.026, "all 3 matrices\ngathered to $\\mathcal{M}$",
+            fontsize=6.6, color=MUTED, va="center", ha="left", linespacing=1.3)
+    ax.text(0.052, BOT + LH / 2 + 0.028, "Layer $i\\!+\\!1$", fontsize=12.5,
+            color=AMBER_D, weight="bold", va="center", ha="left")
+    ax.text(0.052, BOT + LH / 2 - 0.026, "sparse-input probe:\nscore & prefetch",
+            fontsize=6.6, color=MUTED, va="center", ha="left", linespacing=1.3)
+
+    # ======================= TOP LANE: layer i compute ======================
+    # All three matrices now hold only the B kept channels — up is no longer a
+    # full-width read, so its unfetched rows are blank rather than grey.
+    ccy = TOP + LH / 2
+    nb = 0.088
+    blocks = [("gate", "row", "#5f8fe0", BLUE_D),
+              ("up", "row", AMBER, AMBER_D),
+              ("down", "col", "#5f8fe0", BLUE_D)]
+    gx = LBL + 0.055
+    step = 0.205
+    for bi, (name, axis, hot, sub_c) in enumerate(blocks):
+        bx = gx + bi * step
+        ax.add_patch(Rectangle((bx, TOP), nb, LH, facecolor="none",
+                               edgecolor="#cdd5e1", lw=0.7, ls=(0, (2.2, 2.2)),
+                               zorder=2))
+        if axis == "row":
+            hgt = LH * B / WIDE
+            _mesh(ax, bx, TOP + LH - hgt, nb, hgt, B, ND,
+                  lit=range(B), base="none", hot=hot, axis="row")
+        else:
+            _mesh(ax, bx, TOP, nb * B / WIDE, LH, B, ND,
+                  lit=range(B), base="none", hot=hot, axis="col")
+        ax.text(bx + nb / 2, TOP + LH + 0.014, name + "$_{[\\mathcal{M}]}$",
+                ha="center", va="bottom", fontsize=7.4, color=INK, weight="bold")
+        ax.text(bx + nb / 2, TOP - 0.014, f"{B}/{WIDE} channels", ha="center",
+                va="top", fontsize=6.2, color=sub_c)
+    for bi, sym in enumerate(("$\\odot$", "$\\rightarrow$")):
+        sx = gx + bi * step + nb
+        ax.text(sx + (step - nb) / 2, ccy, sym, ha="center", va="center",
+                fontsize=13 if bi == 0 else 12, color=INK, zorder=5)
+    ax.text(gx + 3 * step - 0.02, ccy, "$y$", ha="left", va="center",
+            fontsize=10, color=INK)
+
+    # ======================= BOTTOM LANE: sparse-input probe ================
+    cy = BOT + LH / 2
+
+    # (1) the probe: gate and up read on 3 of 9 input coordinates
+    pw_b = 0.070
+    gx_b, ux_b = 0.178, 0.280
+    for bx, name in ((gx_b, "gate"), (ux_b, "up")):
+        _mesh(ax, bx, BOT, pw_b, LH, WIDE, ND, lit=range(WIDE), base=COLD,
+              hot=AMBER, axis="row", lit_dim=IN_LIT)
+        ax.add_patch(Rectangle((bx, BOT), pw_b, LH, facecolor="none",
+                               edgecolor="#d9cfb4", lw=0.7, zorder=4))
+        ax.text(bx + pw_b / 2, BOT + LH + 0.014,
+                "$\\widetilde{\\mathrm{%s}}$" % name, ha="center", va="bottom",
+                fontsize=8.4, color=INK, weight="bold")
+    ax.text((gx_b + pw_b + ux_b) / 2, cy, "$\\odot$", ha="center", va="center",
+            fontsize=11, color=INK, zorder=5)
+    ax.text((gx_b + ux_b + pw_b) / 2, BOT - 0.014,
+            "read only the token's top-$\\rho_{\\mathrm{input}}$ coords of $x$\n"
+            f"({len(IN_LIT)}/{ND} columns; grey = resident, never read)",
+            ha="center", va="top", fontsize=6.3, color=AMBER_D, linespacing=1.35)
+
+    # (2) the per-channel score heat map, from the partial activations
+    hx, hw, hh = 0.384, 0.206, 0.095
+    hy = cy - hh / 2
+    ax.imshow(score.reshape(1, -1), aspect="auto", cmap="inferno",
+              extent=(hx, hx + hw, hy, hy + hh), zorder=3, vmin=0, vmax=1)
+    ax.add_patch(Rectangle((hx, hy), hw, hh, facecolor="none",
+                           edgecolor="#b9c2d0", lw=0.7, zorder=4))
+    ax.text(hx + hw / 2, hy + hh + 0.018,
+            "$s_j=g_e\\,|\\,\\mathrm{SiLU}(\\tilde g_j)\\,\\tilde u_j\\,|$",
+            ha="center", va="bottom", fontsize=7.2, color=INK)
+    cw = hw / NCH
+    my = hy - 0.046
+    for c in keep:
+        ax.add_patch(Rectangle((hx + c * cw, my), cw, 0.024,
+                               facecolor=BLUE, edgecolor="none", zorder=4))
+    ax.text(hx + hw / 2, my - 0.012,
+            "global top-$B$ mask $\\mathcal{M}$ over the token's $K$ experts",
+            ha="center", va="top", fontsize=6.6, color=BLUE, weight="bold")
+
+    # (3) memory: gather all three matrices to the masked rows/cols
+    mx, mw = 0.628, 0.100
+    ax.add_patch(FancyBboxPatch(
+        (mx, BOT), mw, LH, boxstyle="round,pad=0.005,rounding_size=0.014",
+        facecolor="#eef1f7", edgecolor="#b9c2d0", lw=0.8, zorder=2))
+    for j in range(9):
+        c = BLUE if j in (1, 4, 7) else COLD
+        ax.add_patch(Rectangle((mx + 0.013, BOT + 0.016 + j * 0.031),
+                               mw - 0.026, 0.021, facecolor=c,
+                               edgecolor="none", zorder=3))
+    ax.text(mx + mw / 2, BOT + LH + 0.014, "CPU DRAM / HBM", ha="center",
+            va="bottom", fontsize=6.8, color=INK)
+    ax.text(mx + mw / 2, BOT - 0.014, "fetch $\\mathcal{M}$'s slice of\nall three",
+            ha="center", va="top", fontsize=6.3, color=BLUE, linespacing=1.3)
+
+    for a, b, col in ((ux_b + pw_b, hx, AMBER_D), (hx + hw, mx, BLUE)):
+        ax.add_patch(FancyArrowPatch(
+            (a + 0.008, cy), (b - 0.007, cy), arrowstyle="-|>",
+            mutation_scale=10, lw=1.4, color=col, zorder=5, shrinkA=0, shrinkB=0))
+
+    # (4) staged slice — now gate, up AND down
+    px, pw = 0.766, 0.112
+    ax.add_patch(FancyBboxPatch(
+        (px, BOT + 0.040), pw, LH - 0.080,
+        boxstyle="round,pad=0.005,rounding_size=0.014",
+        facecolor="#e8f0fd", edgecolor=BLUE, lw=1.2, zorder=2))
+    ax.text(px + pw / 2, cy + 0.030,
+            "gate$_{[\\mathcal{M}]}$, up$_{[\\mathcal{M}]}$,\ndown$_{[\\mathcal{M}]}$",
+            ha="center", va="center", fontsize=7.2, color=BLUE_D, weight="bold",
+            linespacing=1.25)
+    ax.text(px + pw / 2, cy - 0.040, "staged", ha="center", va="center",
+            fontsize=6.3, color=BLUE_D)
+    ax.add_patch(FancyArrowPatch(
+        (mx + mw + 0.008, cy), (px - 0.007, cy), arrowstyle="-|>",
+        mutation_scale=10, lw=1.4, color=BLUE, zorder=5, shrinkA=0, shrinkB=0))
+
+    ax.text(0.500, 0.026,
+            "no matrix runs full width  $\\Rightarrow$  used $=\\rho_{\\mathrm{channel}}"
+            "+\\frac{2}{3}\\rho_{\\mathrm{input}}$,  zero extra parameters",
+            ha="center", va="center", fontsize=7.8, color=BLUE_D, weight="bold")
+
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(out_dir, f"fig_framework_input_sparse.{ext}"),
+                    dpi=400)
+    plt.close(fig)
+
+
+FIGS = {
+    "channel_activation": fig_channel_activation,
+    "framework": fig_framework,
+    "framework_input_sparse": fig_framework_input_sparse,
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "docs/presentation/figs"))
+    ap.add_argument("--figs", default="all",
+                    help="comma-separated subset of " + ", ".join(FIGS) + " (default: all)")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
-    fig_channel_activation(args.out_dir)
-    fig_framework(args.out_dir)
-    print(f"[illus] wrote figures to {args.out_dir}")
+    names = list(FIGS) if args.figs == "all" else args.figs.split(",")
+    for name in names:
+        FIGS[name.strip()](args.out_dir)
+    print(f"[illus] wrote {', '.join(names)} to {args.out_dir}")
 
 
 if __name__ == "__main__":

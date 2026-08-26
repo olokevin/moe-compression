@@ -25,6 +25,12 @@ Two families of criteria:
   proxy** of the intermediate, so the decision precedes *every* full-width matmul
   and all three expert matrices are gathered to budget.
 
+``input_only`` is the odd one out: it has **no scorer**. ``gate``/``up`` run on the
+token's top-``rho_input`` coordinates and that sparse result *is* the intermediate,
+so the same reads both decide and compute (ranking is then ``oracle_mag_noW``'s
+rule on the approximate values). It is therefore the only criterion here that
+perturbs the FFN's *values* rather than just its keep-mask. See ``input_only.py``.
+
 The block reads per-layer state attached at install time:
     self._dyn_ranks    (E, I) long   channel ranks by descending score
     self._dyn_contrib  (E,)   float   expert_out_token_contrib >= 0
@@ -36,6 +42,7 @@ The block reads per-layer state attached at install time:
     self._dyn_sc_up    LowRankScorer for up_proj    (lowrank_scorer)
     self._dyn_sc_gate  LowRankScorer for gate_proj  (lowrank_scorer; None => up-only)
     self._dyn_probe    SparseProbe                  (sparse_probe / input_sparse)
+    self._dyn_io       InputOnlyCfg                 (input_only; rho_input + alloc)
     self._dyn_wsparse  WeightSparseProbe            (weight_sparse; unstructured)
     self._dyn_B        int             total kept channels per token
     self._dyn_k_min    int             per-expert floor
@@ -95,6 +102,11 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
     # budget is spent on (channel, coordinate) pairs, not whole coordinates. Same
     # (K, I) proxy tensor, and the same masking simulation.
     need_wsp = self._dyn_criterion == "weight_sparse"
+    # input_only has no proxy at all: gate/up are run on the sparse input and the
+    # result *is* the intermediate, so the sparse read is the compute. It shares
+    # sparse_probe's coordinate allocator, then ranks with oracle_mag_noW's rule
+    # on the approximate intermediate. See input_only.py.
+    need_io = self._dyn_criterion == "input_only"
     probe_ranks = probe_nkeep = hidden_sp = None
     wsp_lvl_u = wsp_lvl_g = None
     if need_wsp:
@@ -141,6 +153,19 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
                 sorted_abs, routing_weights, probe.rho_input,
                 _ALLOC_BETA.get(alloc, 1.0),
             )                                                   # (T, K)
+    if need_io:
+        # Same coordinate choice as sparse_probe -- but the sparse input feeds the
+        # *real* gate/up below rather than a proxy, so hidden_sp/probe_nkeep here
+        # decide the FFN's numbers, not just its keep-mask.
+        io = self._dyn_io
+        if io.input_alloc == "uniform":
+            hidden_sp = sparsify_input_topk(hidden_states, io.rho_input)
+        else:
+            probe_ranks, sorted_abs = descending_abs_ranks(hidden_states)
+            probe_nkeep = allocate_input_reads(
+                sorted_abs, routing_weights, io.rho_input,
+                _ALLOC_BETA.get(io.input_alloc, 1.0),
+            )                                                   # (T, K)
 
     # Materialize each token's K active-expert intermediates into (T, K, I).
     inter_all = torch.zeros((T, K, I), dtype=dtype, device=device)
@@ -154,6 +179,15 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
         expert_layer = self.experts[eid]
         idx, top_x = torch.where(expert_mask[eid].squeeze(0))  # idx in 0..K-1, token id
         cur = hidden_states[top_x]
+        if need_io:
+            # THE method: gate/up see only the token's top-rho_input coordinates,
+            # so `inter_all` below is the sparse-input intermediate itself. Every
+            # other criterion here computes gate/up exactly and perturbs only the
+            # keep-mask; this one perturbs the values too, which is the accuracy
+            # cost it pays for deleting the second (exact) pass.
+            cur = (hidden_sp[top_x] if hidden_sp is not None
+                   else sparsify_input_by_count(
+                       cur, probe_ranks[top_x], probe_nkeep[top_x, idx]))
         gate = expert_layer.gate_proj(cur)
         up = expert_layer.up_proj(cur)
         inter_all[top_x, idx] = (expert_layer.act_fn(gate) * up).to(dtype)
@@ -217,10 +251,15 @@ def _cross_expert_keep(self, hidden_states, routing_weights, selected_experts):
         return inter_all, keep
 
     # Score all K*I channels on one per-token scale.
-    if self._dyn_criterion in ("oracle_mag", "oracle_mag_noW"):
-        # exact per-token magnitude of the down_proj input:
+    if self._dyn_criterion in ("oracle_mag", "oracle_mag_noW", "input_only"):
+        # per-token magnitude of the down_proj input:
         #   oracle_mag     : g_e * |inter| * ||W_down[:,j]||  (full formula)
         #   oracle_mag_noW : g_e * |inter|                    (Q1: drop col-norm)
+        #   input_only     : g_e * |inter|, where `inter` is the sparse-input
+        #                    intermediate -- i.e. oracle_mag_noW's rule applied to
+        #                    the values actually being computed, which is why the
+        #                    selection costs nothing extra. At rho_input=1 the two
+        #                    are the same code path *and* the same cost.
         g = routing_weights.to(torch.float32)                  # (T, K)
         score = g.unsqueeze(-1) * inter_all.abs().float()
         if self._dyn_criterion == "oracle_mag":
