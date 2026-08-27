@@ -18,6 +18,38 @@ def count_params(model):
     return sum(p.numel() for p in model.parameters())
 
 
+def maybe_install_lm_head(args, model, tokenizer):
+    """Install an lm_head baseline if ``prune_kwargs.lm_head.enabled`` is set.
+
+    Called immediately before every ``eval_dispatch`` on every branch, which is what
+    makes the head arm compose with the expert-pruning arm: the head's share of
+    active params rises from ~9.3% to ~15.4% once the experts are compressed, and
+    the composed run needs both installed at once.
+    """
+    cfg = (args.prune_kwargs or {}).get("lm_head", {}) or {}
+    if not cfg.get("enabled", False):
+        return model
+    from src.lm_head import install_lm_head
+
+    _print(f"\n[Step 4b] Installing lm_head baseline (method={cfg.get('method', 'freq_tier')})")
+    model = install_lm_head(model, cfg, tokenizer=tokenizer, args=args)
+    _print(f"[Step 4b] ✅ lm_head method installed")
+    return model
+
+
+def report_lm_head_eval_stats(model):
+    """Print the tier hit-rate accumulated over the eval stream, if a mask was installed."""
+    from src.lm_head import lm_head_eval_stats
+
+    st = lm_head_eval_stats(model)
+    if st:
+        _print(
+            f"[Step 6] lm_head tier hit-rate over the eval stream: "
+            f"argmax in tier {100 * st['argmax_in_tier']:.2f}% "
+            f"over {st['eval_tokens']:,} scored positions"
+        )
+
+
 def main(args, model, tokenizer):
     
     model.eval()
@@ -113,8 +145,10 @@ def main(args, model, tokenizer):
         _print(f"[Step 4] ✅ Set top_k={new_topk} on {n_set} MoE blocks (no slimming)")
 
         if not dynamic_enabled:
+            model = maybe_install_lm_head(args, model, tokenizer)
             _print(f"\n[Step 6] Start evaluation...")
             results = eval_dispatch(args, model, tokenizer, verbose=True)
+            report_lm_head_eval_stats(model)
             _print(f"[Step 6] ✅ Evaluation results: {results}")
             return
         _print(
@@ -169,8 +203,10 @@ def main(args, model, tokenizer):
                 verbose=True,
             )
             _print(f"[Step 4] ✅ Channel router installed on {len(sels)} MoE blocks")
+            model = maybe_install_lm_head(args, model, tokenizer)
             _print(f"\n[Step 6] Start evaluation...")
             results = eval_dispatch(args, model, tokenizer, verbose=True)
+            report_lm_head_eval_stats(model)
             summ = [s.summary() for s in sels.values() if s.stats["tokens"]]
             if summ:
                 mr = sum(s["mass_recall"] for s in summ) / len(summ)
@@ -335,8 +371,10 @@ def main(args, model, tokenizer):
                 scorer_kwargs=scorer_kwargs,
             )
             _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
+            model = maybe_install_lm_head(args, model, tokenizer)
             _print(f"\n[Step 6] Start evaluation...")
             results = eval_dispatch(args, model, tokenizer, verbose=True)
+            report_lm_head_eval_stats(model)
             if criterion == "weight_sparse":
                 # The claim is an active-parameter claim, so verify the realized
                 # read budget over the eval stream rather than trusting the config
@@ -397,8 +435,10 @@ def main(args, model, tokenizer):
             _print(f"[Step 4] ✅ Dynamic allocation installed (no physical slimming)")
             total_params_after_slim = count_params(model)
             _print(f"[Info] Params unchanged (masking simulation): {total_params_after_slim:,}")
+            model = maybe_install_lm_head(args, model, tokenizer)
             _print(f"\n[Step 6] Start evaluation...")
             results = eval_dispatch(args, model, tokenizer, verbose=True)
+            report_lm_head_eval_stats(model)
             _print(f"[Step 6] ✅ Evaluation results: {results}")
             return
 
@@ -450,8 +490,10 @@ def main(args, model, tokenizer):
         total_params_after_slim = count_params(model)
         _print(f"[Info] Params unchanged (masking simulation): {total_params_after_slim:,}")
 
+        model = maybe_install_lm_head(args, model, tokenizer)
         _print(f"\n[Step 6] Start evaluation...")
         results = eval_dispatch(args, model, tokenizer, verbose=True)
+        report_lm_head_eval_stats(model)
         _print(f"[Step 6] ✅ Evaluation results: {results}")
         return
 
@@ -540,10 +582,12 @@ def main(args, model, tokenizer):
         _print(f"[Step 5] ✅ Throughput = {res}")
         log_memory_usage(tag=f"real_slim: {args.test_speed}")
 
+    model = maybe_install_lm_head(args, model, tokenizer)
     _print(f"\n[Step 6] Start evaluation...")
     results = eval_dispatch(args, model, tokenizer, verbose=True)
+    report_lm_head_eval_stats(model)
     _print(f"[Step 6] ✅ Evaluation results: {results}")
-    
+
 
 if __name__ == "__main__":
     args = parse_args()

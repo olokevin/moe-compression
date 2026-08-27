@@ -192,3 +192,7 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks
+### lm_head baselines: local calibration artifacts and run logs
+calib/
+results_eval/
+run_logs/
