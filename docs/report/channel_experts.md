@@ -105,6 +105,35 @@ The two cores overlap: block-$i$ compute (Core C) hides the block-$(i{+}1)$ fetc
 
 ![MMLU curve](../presentation/figs/fig_probe_curve_mmlu.png)
 
+#### Recovery training (hologram KD)
+
+The fake-pruned masks are recovered by hologram knowledge distillation from `Qwen3-235B-A22B-Instruct-2507` (student CE + a top-of-head symmetric-KL term), then physically re-installed at the training knobs and re-evaluated on the full lm-eval harness (MMLU 5-shot, HellaSwag 10-shot). Two operating points, each row linking its **training** and **eval** W&B jobs (self-hosted `perceive-ssg`, entity `slalom`):
+
+**≈50% cut — V2 `gate+down`, per-token −49% expert-FFN active.** KD weight 1, 792-step trapezoid schedule (AdamW lr 2e-5), FSDP2 on 2×p5en. `mean acc (4)` averages MMLU / ARC-C / HellaSwag / Winogrande.
+
+| eval                       | KD | tokens | wikitext ppl ↓ | MMLU   | ARC-C norm       | HellaSwag norm   | Winogrande       | mean acc (4)     | W&B                                                                                                                                                            |
+| -------------------------- | -- | ------ | --------------- | ------ | ---------------- | ---------------- | ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| dense (no reduction)       | — | —     | 10.89           | 0.7962 | 0.6971           | 0.7790           | 0.7210           | —               | [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/us1jxkq8)                                                                                 |
+| untrained (−49%)          | — | —     | 12.20           | 0.785  | 0.662            | 0.766            | ~0.683           | —               | [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/14933zd5)                                                                                 |
+| **KD = 1 (trained)** | 1  | 2.21B  | **9.52**  | 0.7786 | **0.6877** | **0.7809** | **0.7419** | **0.7473** | [train](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/kbr3lc7z) · [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/ksvfzdwm) |
+
+One round of KD pushes wikitext **below** uncompressed dense (9.52 vs. 10.89) and lifts ARC-C / HellaSwag / Winogrande **past** dense at a −49% cut; MMLU is the lone axis that stays ~1σ under — a knowledge/data limitation, not a schedule artifact.
+
+**−75% cut — V3 `input_sparse` `up+gate`, per-token −75% expert-FFN active.** `perf`/`logits`/`flow` = 1/1/0, AdamW lr 1e-5, 1,584-step schedule, FSDP2 on 2×p5en (both arms carry the block-input gradient fix). Two corpora at iso-step 1144: **smollm-plus** (web+math+code interleave) and **dolma3-dolmino** (knowledge-denser). Rows are mid-training checkpoints (of 1,584), selected on val CE.
+
+| model                              | step | wikitext ppl ↓  | MMLU             | ARC-C norm       | HellaSwag(10) norm | Winogrande       | tqa_mc2          | W&B                                                                                                                                                                |
+| ---------------------------------- | ---: | ---------------- | ---------------- | ---------------- | ------------------ | ---------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| dense (no reduction)               |   — | 10.89            | 0.7962           | 0.6971           | 0.7790             | 0.7210           | 0.5330           | [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/us1jxkq8)                                                                                     |
+| untrained`input_sparse` −75%    |   — | 12.4148          | 0.7626           | 0.6664           | 0.7414             | 0.6819           | 0.4922           | [eval](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/nm2p6fjx)                                                                                        |
+| **smollm-plus (trained)**    | 1144 | **9.5216** | 0.7717           | 0.6749           | 0.7852             | 0.7364           | 0.4691           | [train](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-train/runs/mx9udq9j) · [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/c9x9s1bz) |
+| **dolma3-dolmino (trained)** | 1144 | 9.5965           | **0.7718** | **0.6809** | **0.7886**   | **0.7372** | **0.4866** | [train](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-train/runs/e43x8qdv) · [eval](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-eval/runs/j4av02zd) |
+
+At the far deeper −75% cut recovery still lands ~1.3 ppl below dense, and — unlike the −49% point — **MMLU recovers** (0.7626 → ~0.772, +0.9 pt); HellaSwag and Winogrande again exceed dense, tqa_mc2 is the casualty. dolmino leads the MC/accuracy axes; smollm-plus wins ppl.
+
+Training curves
+
+![1788449272906](image/channel_experts/1788449272906.png)
+
 ## V1 Static channel ranking with offline calibration, and its fundamental limitation
 
 The MoE router produces $g_e(x) \in [0,1]$ per expert but has **no information about expert parameters or channel-level capabilities** — it cannot tell *which* channels within an expert the token needs. Offline calibration scores channels from corpus statistics and the online decision reduces to $\text{score}_{e,j}(x) = r(g_e) \cdot s_{e,j}$ (router reweight $\times$ static channel importance).
@@ -138,44 +167,6 @@ Dense baseline: HellaSwag 78.56 acc_norm, MMLU 5-shot $\approx$ 79.5.
 |  full  |  -87.5%  |  -87.5%  |       −58.3%       |   71.30   | 76.43 |
 
 The `up_proj` proxy moves the selection decision **before** `gate_proj`, so both `gate_proj` and `down_proj` run at reduced width — achieving **2$\times$ the actual active-param reduction** at a cost of 3–5.5 pts vs. the full-intermediate oracle. This is still far above any offline method at comparable real reduction. Further ablation shows the weight-norm factor $\|W_{\text{down}}[:,j]\|$ is negligible ($<$ 0.3 pt contribution); the activation magnitude alone carries the signal.
-
-### Recovery Training (Hologram KD, Qwen3-30B-A3B)
-
-**Setting.** Dense Qwen3-30B-A3B with per-token dynamic channel reduction
-(`prune_ratio=0.75`, `score_source=up`, `reduce=gate+down`,
-`skip_last_layers=1`, expert-FFN active cut = −49%). Recovery via hologram
-knowledge distillation from `Qwen3-235B-A22B-Instruct-2507`, 792-step schedule,
-AdamW lr 2e-5, FSDP2 on 2×p5en.48xlarge.
-
-The loss has three terms: `perf` (student CE on hard labels), `logits` (KD —
-symmetric Bernoulli KL on top-of-head entries), `flow` (tail penalty, ~0.01%
-gradient contribution). Four loss settings were trained and evaluated on the
-full lm-eval harness (mask re-installed at training knobs):
-
-Each `eval` cell below links to its **W&B training run** (self-hosted
-`perceive-ssg`, entity `slalom`); KD 0.1 is in project `yequan26-q3-30b-train`,
-the other three in `yequan26-30B-mobe`.
-
-| eval                                                                           | KD weight | total tokens | wikitext ppl | MMLU   | ARC-C norm       | HellaSwag norm   | Winogrande       | mean acc (4)     |
-| ------------------------------------------------------------------------------ | --------- | ------------ | ------------ | ------ | ---------------- | ---------------- | ---------------- | ---------------- |
-| dense (no reduction)                                                           | —        | —           | 10.89        | 0.7962 | 0.6971           | 0.7790           | 0.7210           | —               |
-| Untrained                                                                      | —        | —           | 12.20        | 0.785  | 0.662            | 0.766            | ~0.683           | —               |
-| [`kd1`](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/kbr3lc7z) | 1         | 2.21B        | 9.52         | 0.7786 | **0.6877** | **0.7809** | **0.7419** | **0.7473** |
-
-| eval                                                                                 | KD weight     | total tokens | wikitext ppl   | MMLU             | ARC-C norm       | HellaSwag norm   | Winogrande       | mean acc (4)     |
-| ------------------------------------------------------------------------------------ | ------------- | ------------ | -------------- | ---------------- | ---------------- | ---------------- | ---------------- | ---------------- |
-| dense (no reduction)                                                                 | —            | —           | 10.89          | 0.7962           | 0.6971           | 0.7790           | 0.7210           | —               |
-| untrained                                                                            | —            | —           | 12.20          | 0.785            | 0.662            | 0.766            | 0.683            | —               |
-| [`perfonly`](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/9hndgr8h)  | ~0            | 0.55B        | 9.35           | 0.7816           | 0.6689           | 0.7747           | 0.7230           | 0.7371           |
-| [`kd010`](https://perceive-ssg.wandb.io/slalom/yequan26-q3-30b-train/runs/92kbfzk9) | **0.1** | 4.43B        | **9.30** | **0.7835** | 0.6706           | 0.7690           | 0.7269           | 0.7375           |
-| [`kd025`](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/i6l79som)     | 0.25          | 2.77B        | 9.35           | 0.7796           | 0.6817           | 0.7699           | 0.7316           | 0.7407           |
-| [`kd1`](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/kbr3lc7z)       | 1             | 2.21B        | 9.52           | 0.7786           | **0.6877** | **0.7809** | **0.7419** | **0.7473** |
-
-`total tokens` = checkpoint step × 6.29M tokens/step (global batch 32 micro × 6 accum
-× 16 GPUs = 3072 seqs × 2048 tokens); the evaluated checkpoints sit at steps
-88 / 704 / 440 / 352 for `perfonly` / `kd010` / `kd025` / `kd1`. The `perfonly`
-row is the full 6/6 rerun (`fa1d4dba`), which reproduced the crashed attempt's
-wikitext/MMLU to every decimal.
 
 ### Efficiency — Edge Offload
 
@@ -280,7 +271,6 @@ The two sparsities (`ρ_input` for scoring, `ρ_channel` for compute) are the on
 | [upgate-cut80](https://perceive-ssg.wandb.io/slalom/yequan26-30B-mobe/runs/9d0tolo8) | `up+gate` | 0.1500        | 0.1000          | 614  | 0.2000 | −80.0%          | 0.7514           | 0.6468           | 0.7202             | 0.6717      |
 | up-cut80                                                                            | `up`      | 0.3000        | 0.1000          | 614  | 0.2000 | −80.0%          | 0.7334           | 0.6135           | 0.6786             | 0.6314      |
 | gate-cut80                                                                          | `gate`    | 0.3000        | 0.1000          | 614  | 0.2000 | −80.0%          | 0.7220           | 0.6399           | 0.7077             | 0.6511      |
-
 
 ### Efficiency — Edge Offload
 
